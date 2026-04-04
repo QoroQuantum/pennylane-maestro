@@ -1,0 +1,76 @@
+schema = 3
+
+# ──────────────────────────────────────────────────────────
+# Gates natively executed by the Maestro simulator backend.
+# PennyLane will decompose anything NOT listed here.
+# ──────────────────────────────────────────────────────────
+[operators.gates]
+
+PauliX     = { properties = ["controllable", "invertible"] }
+PauliY     = { properties = ["controllable", "invertible"] }
+PauliZ     = { properties = ["controllable", "invertible"] }
+Hadamard   = { properties = ["controllable", "invertible"] }
+S          = { properties = ["invertible"] }
+T          = { properties = ["invertible"] }
+SX         = { properties = ["invertible"] }
+RX         = { properties = ["invertible", "differentiable"] }
+RY         = { properties = ["invertible", "differentiable"] }
+RZ         = { properties = ["invertible", "differentiable"] }
+PhaseShift = { properties = ["invertible", "differentiable"] }
+CNOT       = { properties = ["invertible"] }
+CY         = { properties = ["invertible"] }
+CZ         = { properties = ["invertible"] }
+CH         = { properties = ["invertible"] }
+SWAP       = { properties = ["invertible"] }
+Toffoli    = { properties = ["invertible"] }
+CSWAP      = { properties = ["invertible"] }
+CRX        = { properties = ["invertible", "differentiable"] }
+CRY        = { properties = ["invertible", "differentiable"] }
+CRZ        = { properties = ["invertible", "differentiable"] }
+ControlledPhaseShift = { properties = ["invertible", "differentiable"] }
+U3         = { properties = ["invertible", "differentiable"] }
+"Adjoint(S)"  = { }
+"Adjoint(T)"  = { }
+"Adjoint(SX)" = { }
+
+# ──────────────────────────────────────────────────────────
+# Observables supported by the device for measurements.
+# ──────────────────────────────────────────────────────────
+[operators.observables]
+
+PauliX      = { }
+PauliY      = { }
+PauliZ      = { }
+Identity    = { }
+Hadamard    = { }
+Hermitian   = { }
+Hamiltonian = { conditions = ["terms-commute"] }
+Sum         = { conditions = ["terms-commute"] }
+SProd       = { }
+Prod        = { }
+LinearCombination = { }
+
+# ──────────────────────────────────────────────────────────
+# Measurement processes the device can handle.
+# ──────────────────────────────────────────────────────────
+[measurement_processes]
+
+ExpectationMP  = { }
+VarianceMP     = { }
+ProbabilityMP  = { }
+SampleMP       = { conditions = ["finiteshots"] }
+CountsMP       = { conditions = ["finiteshots"] }
+StateMP        = { conditions = ["analytic"] }
+
+# ──────────────────────────────────────────────────────────
+# Compilation settings
+# ──────────────────────────────────────────────────────────
+[compilation]
+
+qjit_compatible              = false
+runtime_code_generation      = false
+dynamic_qubit_management     = false
+overlapping_observables      = true
+non_commuting_observables    = true
+initial_state_prep           = false
+supported_mcm_methods        = ["one-shot"]

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pennylane-maestro"
+version = "0.1.0"
+description = "PennyLane plugin for the Maestro quantum simulator by Qoro Quantum"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "GPL-3.0"}
+authors = [{name = "Qoro Quantum", email = "team@qoroquantum.de"}]
+dependencies = [
+    "pennylane>=0.38",
+    "qoro-maestro>=0.2.8",
+    "numpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/QoroQuantum/pennylane-maestro"
+Repository = "https://github.com/QoroQuantum/pennylane-maestro"
+Issues = "https://github.com/QoroQuantum/pennylane-maestro/issues"
+
+[project.entry-points."pennylane.plugins"]
+"maestro.qubit" = "pennylane_maestro:MaestroQubitDevice"
+
+[tool.setuptools.packages.find]
+include = ["pennylane_maestro*"]
+
+[tool.setuptools.package-data]
+pennylane_maestro = ["config.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
