@@ -105,7 +105,6 @@ class MaestroQubitDevice(Device):
             - ``"QCSim"`` — Qoro's optimised CPU simulator (default)
             - ``"Gpu"`` — CUDA-accelerated GPU simulator
             - ``"CompositeQCSim"`` — Multi-node distributed CPU
-            - ``"QuestSim"`` — QuEST-based reference simulator
 
         simulation_type (str): Simulation algorithm. Options:
 
