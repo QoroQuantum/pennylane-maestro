@@ -99,7 +99,7 @@ dev = qml.device("maestro.qubit", wires=10, shots=10_000)
 |---|---|
 | `"QCSim"` | Qoro's optimised CPU simulator **(default)** |
 | `"Gpu"` | CUDA-accelerated GPU simulator |
-| `"CompositeQCSim"` | Multi-node distributed CPU |
+| `"CompositeQCSim"` | p-block Simulation |
 
 | `simulation_type` | Description |
 |---|---|
