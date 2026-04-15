@@ -3,6 +3,7 @@
 Implements the **new** ``pennylane.devices.Device`` interface (schema 3).
 """
 
+import warnings
 from os import path
 from typing import Union
 
@@ -11,15 +12,7 @@ import pennylane as qml
 from pennylane.devices import Device, ExecutionConfig
 from pennylane.devices.modifiers import simulator_tracking, single_tape_support
 from pennylane.devices.preprocess import decompose as _decompose
-from pennylane.measurements import (
-    CountsMP,
-    ExpectationMP,
-    MidMeasureMP,
-    ProbabilityMP,
-    SampleMP,
-    StateMP,
-    VarianceMP,
-)
+from pennylane.measurements import ExpectationMP, MidMeasureMP
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
 from pennylane.transforms import defer_measurements
@@ -30,7 +23,6 @@ except ImportError:
 from pennylane.typing import Result, ResultBatch
 
 import maestro
-from maestro.circuits import QuantumCircuit
 
 from pennylane_maestro.converter import (
     GATE_MAP,
@@ -183,7 +175,12 @@ class MaestroQubitDevice(Device):
         singular_value_threshold=None,
         use_double_precision: bool = False,
     ):
-        super().__init__(wires=wires, shots=shots)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Setting shots on device is deprecated",
+            )
+            super().__init__(wires=wires, shots=shots)
         self._simulator_type = _resolve_enum(
             simulator_type, _SIMULATOR_TYPE_MAP, "SimulatorType"
         )
