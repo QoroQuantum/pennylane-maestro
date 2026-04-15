@@ -14,7 +14,7 @@ import pennylane as qml
 # Fixtures
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(params=["one-shot", "deferred"])
+@pytest.fixture(params=["deferred"])
 def mcm_method(request):
     return request.param
 

@@ -205,9 +205,9 @@ class MaestroQubitDevice(Device):
 
         Mid-circuit measurement (MCM) strategy
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        Both ``mcm_method="one-shot"`` and ``mcm_method="deferred"`` are
-        handled by applying :func:`~pennylane.transforms.defer_measurements`
-        before gate decomposition.  This transform:
+        MCMs are handled by applying
+        :func:`~pennylane.transforms.defer_measurements` before gate
+        decomposition.  This transform:
 
         * Replaces every :class:`~pennylane.measurements.MidMeasureMP` with
           an ancilla qubit and a CNOT gate (so the ancilla holds the MCM
@@ -246,7 +246,7 @@ class MaestroQubitDevice(Device):
         # defer_measurements is idempotent on circuits without MCMs, so we
         # apply it unconditionally when the user has requested (or not
         # yet specified) an MCM strategy.
-        if mcm_method in {"one-shot", "deferred", None}:
+        if mcm_method in {"deferred", None}:
             program.add_transform(
                 defer_measurements,
                 allow_postselect=False,

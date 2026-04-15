@@ -74,4 +74,4 @@ dynamic_qubit_management     = false
 overlapping_observables      = true
 non_commuting_observables    = true
 initial_state_prep           = false
-supported_mcm_methods        = ["one-shot", "deferred"]
+supported_mcm_methods        = ["deferred"]
