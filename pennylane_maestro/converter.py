@@ -1,5 +1,7 @@
 """Converts PennyLane QuantumScript tapes into Maestro QuantumCircuit objects."""
 
+from dataclasses import dataclass, field
+
 import numpy as np
 import pennylane as qml
 from pennylane.measurements import MidMeasureMP
@@ -43,19 +45,39 @@ ADJOINT_MAP = {
 }
 
 
-def _apply_operation(qc: QuantumCircuit, op: qml.operation.Operator) -> None:
+def _apply_operation(
+    qc: QuantumCircuit,
+    op: qml.operation.Operator,
+    mcm_tracker: "MCMTracker | None" = None,
+) -> None:
     """Apply a single PennyLane operation to a Maestro QuantumCircuit.
 
     Handles regular gates, adjoint wrappers, parametric gates, and
     mid-circuit measurements (with optional qubit reset).
     Wires must already be mapped to 0-indexed integers.
+
+    Args:
+        qc: The Maestro circuit to append operations to.
+        op: The PennyLane operation.
+        mcm_tracker: If provided, enables native MCM mode — each
+            ``MidMeasureMP`` is assigned a unique classical bit index
+            via this tracker.  If ``None``, the legacy deferred path
+            is used.
     """
     # ── Mid-circuit measurement ───────────────────────────
     if isinstance(op, MidMeasureMP):
         wire = int(op.wires[0])
-        qc.measure(wire)
-        if op.reset:
-            qc.reset(wire)
+        if mcm_tracker is not None:
+            # Native MCM: measure into a tracked classical bit
+            bit_idx = mcm_tracker.allocate(op)
+            qc.measure([(wire, bit_idx)])
+            if op.reset:
+                qc.reset(wire)
+        else:
+            # Legacy path (deferred mode): measure qubit→qubit mapping
+            qc.measure([(wire, wire)])
+            if op.reset:
+                qc.reset(wire)
         return
 
     # ── Conditional (classically-controlled) op ───────────
@@ -144,6 +166,69 @@ def tape_to_maestro(
         _apply_operation(qc, op)
 
     return qc
+
+
+# ---------------------------------------------------------------------------
+# Native MCM support
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MCMTracker:
+    """Tracks classical bit allocation for native mid-circuit measurements.
+
+    Each ``MidMeasureMP`` is assigned a unique classical bit index.
+    The mapping from PennyLane's internal MCM id to classical bit index
+    is stored so the device can extract outcomes from Maestro's counts.
+    """
+
+    _next_bit: int = 0
+    # Maps MidMeasureMP.id → classical bit index
+    id_to_bit: dict = field(default_factory=dict)
+
+    def allocate(self, op: MidMeasureMP) -> int:
+        """Allocate a new classical bit for a mid-circuit measurement."""
+        bit_idx = self._next_bit
+        self._next_bit += 1
+        if op.id is not None:
+            self.id_to_bit[op.id] = bit_idx
+        return bit_idx
+
+    @property
+    def num_classical_bits(self) -> int:
+        """Total number of classical bits allocated."""
+        return self._next_bit
+
+
+def tape_to_maestro_native(
+    tape: qml.tape.QuantumScript,
+    num_wires: int,
+) -> tuple[QuantumCircuit, MCMTracker]:
+    """Convert a PennyLane tape with MCMs into a Maestro circuit using
+    native mid-circuit measurement (true wavefunction collapse).
+
+    Unlike ``tape_to_maestro()``, this function does **not** require
+    ``defer_measurements`` preprocessing.  Each ``MidMeasureMP`` is
+    translated to Maestro's native ``measure([(qubit, classical_bit)])``
+    instruction, keeping the circuit at the physical qubit count.
+
+    Args:
+        tape: A ``QuantumScript`` whose wires are 0-indexed integers.
+        num_wires: Total number of qubits for the circuit.
+
+    Returns:
+        A tuple of ``(QuantumCircuit, MCMTracker)``.
+    """
+    qc = QuantumCircuit()
+    tracker = MCMTracker()
+
+    # Ensure Maestro allocates exactly `num_wires` qubits
+    for q in range(num_wires):
+        qc.rz(q, 0.0)
+
+    for op in tape.operations:
+        _apply_operation(qc, op, mcm_tracker=tracker)
+
+    return qc, tracker
 
 
 def observable_to_pauli_string(

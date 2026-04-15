@@ -12,7 +12,7 @@ import pennylane as qml
 from pennylane.devices import Device, ExecutionConfig
 from pennylane.devices.modifiers import simulator_tracking, single_tape_support
 from pennylane.devices.preprocess import decompose as _decompose
-from pennylane.measurements import ExpectationMP, MidMeasureMP
+from pennylane.measurements import ExpectationMP, MidMeasureMP, SampleMP
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
 from pennylane.transforms import defer_measurements
@@ -28,6 +28,8 @@ from pennylane_maestro.converter import (
     GATE_MAP,
     ADJOINT_MAP,
     tape_to_maestro,
+    tape_to_maestro_native,
+    MCMTracker,
     observable_to_pauli_string,
     decompose_hamiltonian_to_pauli_terms,
 )
@@ -202,24 +204,14 @@ class MaestroQubitDevice(Device):
 
         Mid-circuit measurement (MCM) strategy
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        MCMs are handled by applying
-        :func:`~pennylane.transforms.defer_measurements` before gate
-        decomposition.  This transform:
+        When ``mcm_method="deferred"`` (the explicit default), MCMs are
+        handled by :func:`~pennylane.transforms.defer_measurements`.
 
-        * Replaces every :class:`~pennylane.measurements.MidMeasureMP` with
-          an ancilla qubit and a CNOT gate (so the ancilla holds the MCM
-          outcome).
-        * Replaces every :class:`~pennylane.ops.op_math.Conditional`
-          (classically conditioned gate) with a controlled gate driven by
-          the corresponding ancilla qubit.
-        * Handles ``reset=True`` MCMs by adding an additional controlled-X
-          on the original wire (using the ancilla as control), resetting the
-          wire to |0> while the ancilla retains the measurement value.
-
-        The resulting tape contains only standard gates that are already in
-        Maestro's native gate set, so no Maestro-side API changes are
-        required.  For circuits without any MCMs the transform is a no-op,
-        leaving existing behaviour unchanged.
+        When ``mcm_method`` is ``None`` (unset), MCMs are executed
+        **natively** via Maestro's built-in ``measure`` / ``reset``
+        instructions with true wavefunction collapse.  This keeps the
+        circuit at the physical qubit count (no ancilla inflation) and
+        produces physically correct results for QEC-style circuits.
         """
         config = execution_config or ExecutionConfig()
         mcm_method = (
@@ -233,25 +225,20 @@ class MaestroQubitDevice(Device):
         program = CompilePipeline()
 
         # ── Wire validation ──────────────────────────────────────────────
-        # Expand wildcard measurements (qml.sample(), qml.counts() with no
-        # args) to the full device wire set *before* defer_measurements runs.
-        # Without this a 2-wire device that only has gates on wire 0 would
-        # return 1-column samples instead of 2-column samples.
         program.add_transform(validate_device_wires, self.wires, name=self.name)
 
         # ── MCM handling ────────────────────────────────────────────────
-        # defer_measurements is idempotent on circuits without MCMs, so we
-        # apply it unconditionally when the user has requested (or not
-        # yet specified) an MCM strategy.
-        if mcm_method in {"deferred", None}:
+        # Only apply defer_measurements when explicitly requested.
+        # When mcm_method is None (default), we use native MCM execution
+        # which preserves the MidMeasureMP ops in the tape for the device
+        # to handle directly.
+        if mcm_method == "deferred":
             program.add_transform(
                 defer_measurements,
                 allow_postselect=False,
             )
 
         # ── Gate decomposition ──────────────────────────────────────────
-        # After deferral, the tape contains only standard gates.
-        # Decompose any gate not natively supported by the Maestro converter.
         program.add_transform(
             _decompose,
             stopping_condition=_maestro_stopping_condition,
@@ -284,7 +271,23 @@ class MaestroQubitDevice(Device):
         tape = tape.map_to_standard_wires()
         num_wires = len(tape.wires) if len(tape.wires) > 0 else 1
 
+        # Check if this tape has native MCMs (not yet deferred)
+        has_mcm = any(
+            isinstance(op, MidMeasureMP) for op in tape.operations
+        )
+
         is_analytic = not tape.shots
+
+        if has_mcm and not is_analytic:
+            # Native MCM path — requires finite shots
+            shot_results = []
+            for shot_copy in tape.shots:
+                shot_results.append(
+                    self._execute_native_mcm(tape, num_wires, shot_copy)
+                )
+            if not tape.shots.has_partitioned_shots:
+                return shot_results[0]
+            return tuple(shot_results)
 
         if is_analytic:
             return self._execute_analytic(tape, num_wires)
@@ -402,6 +405,103 @@ class MaestroQubitDevice(Device):
         if len(tape.measurements) == 1:
             return results[0]
         return results
+
+    # ------------------------------------------------------------------
+    # Native MCM execution (true wavefunction collapse)
+    # ------------------------------------------------------------------
+
+    def _execute_native_mcm(
+        self, tape: QuantumScript, num_wires: int, shots: int
+    ) -> Result:
+        """Execute a tape with native mid-circuit measurements.
+
+        Uses Maestro's built-in ``measure([(qubit, classical_bit)])`` and
+        ``reset()`` instructions.  The circuit stays at the physical qubit
+        count with true wavefunction collapse — no ancilla inflation.
+
+        The counts bitstring from Maestro has ``num_classical_bits``
+        positions for MCM outcomes, followed by ``num_wires`` positions
+        for the final qubit-state measurement.
+        """
+        # Convert tape with native MCM tracking
+        qc, tracker = tape_to_maestro_native(tape, num_wires)
+
+        # Add final measurement of all qubits.
+        # Classical bits for final measurement start after MCM bits.
+        n_mcm_bits = tracker.num_classical_bits
+        final_pairs = [
+            (q, n_mcm_bits + q) for q in range(num_wires)
+        ]
+        qc.measure(final_pairs)
+
+        total_classical_bits = n_mcm_bits + num_wires
+
+        kwargs = dict(
+            simulator_type=self._simulator_type,
+            simulation_type=self._simulation_type,
+            shots=shots,
+            use_double_precision=self._use_double_precision,
+        )
+        if self._max_bond_dimension is not None:
+            kwargs["max_bond_dimension"] = self._max_bond_dimension
+        if self._singular_value_threshold is not None:
+            kwargs["singular_value_threshold"] = self._singular_value_threshold
+
+        raw = qc.execute(**kwargs)
+        counts = raw["counts"]
+
+        # Build samples array: (shots, total_classical_bits)
+        all_samples = _counts_to_samples(counts, total_classical_bits)
+
+        # Split into MCM samples and qubit samples
+        mcm_samples = all_samples[:, :n_mcm_bits]     # (shots, n_mcm_bits)
+        qubit_samples = all_samples[:, n_mcm_bits:]    # (shots, num_wires)
+
+        # Process each measurement
+        results = []
+        for mp in tape.measurements:
+            if hasattr(mp, 'mv') and mp.mv is not None:
+                # This is a measurement of an MCM value (e.g. qml.sample(m))
+                # Find which classical bit(s) this MeasurementValue references
+                mcm_ids = [mid_mp.id for mid_mp in mp.mv.measurements]
+                if len(mcm_ids) == 1 and mcm_ids[0] in tracker.id_to_bit:
+                    bit_idx = tracker.id_to_bit[mcm_ids[0]]
+                    # Extract the column for this classical bit
+                    col = mcm_samples[:, bit_idx]
+                    # For SampleMP, return the raw array
+                    if isinstance(mp, SampleMP):
+                        results.append(col)
+                    else:
+                        # For other types, build a single-column samples array
+                        single_sample = col.reshape(-1, 1)
+                        results.append(
+                            mp.process_samples(single_sample, qml.wires.Wires([0]))
+                        )
+                else:
+                    # Composite MeasurementValue — apply processing_fn
+                    mcm_cols = []
+                    for mid_id in mcm_ids:
+                        if mid_id in tracker.id_to_bit:
+                            mcm_cols.append(mcm_samples[:, tracker.id_to_bit[mid_id]])
+                    if mcm_cols:
+                        combined = np.column_stack(mcm_cols)
+                        results.append(
+                            mp.process_samples(combined, qml.wires.Wires(range(len(mcm_cols))))
+                        )
+                    else:
+                        raise ValueError(
+                            f"MCM id(s) {mcm_ids} not found in tracker. "
+                            "Ensure all mid-circuit measurements are tracked."
+                        )
+            else:
+                # Terminal measurement on qubits (expval, sample, counts, etc.)
+                results.append(
+                    mp.process_samples(qubit_samples, tape.wires)
+                )
+
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
 
     # ------------------------------------------------------------------
     # Fast Pauli-expectation path via Maestro estimate()
