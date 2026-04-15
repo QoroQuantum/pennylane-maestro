@@ -10,16 +10,21 @@ import numpy as np
 import pennylane as qml
 from pennylane.devices import Device, ExecutionConfig
 from pennylane.devices.modifiers import simulator_tracking, single_tape_support
-from pennylane.tape import QuantumScript, QuantumScriptOrBatch
-from pennylane.typing import Result, ResultBatch
+from pennylane.devices.preprocess import decompose as _decompose
 from pennylane.measurements import (
     CountsMP,
     ExpectationMP,
+    MidMeasureMP,
     ProbabilityMP,
     SampleMP,
     StateMP,
     VarianceMP,
 )
+from pennylane.ops.op_math import Adjoint, Conditional
+from pennylane.tape import QuantumScript, QuantumScriptOrBatch
+from pennylane.transforms import defer_measurements
+from pennylane.transforms.core import CompilePipeline
+from pennylane.typing import Result, ResultBatch
 
 import maestro
 from maestro.circuits import QuantumCircuit
@@ -86,6 +91,27 @@ def _counts_to_samples(counts: dict, num_wires: int) -> np.ndarray:
         for _ in range(count):
             samples.append(row)
     return np.array(samples, dtype=np.int64)
+
+
+# ---------------------------------------------------------------------------
+# Stopping condition for gate decomposition
+# ---------------------------------------------------------------------------
+
+def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
+    """Return ``True`` for ops that the Maestro converter handles natively.
+
+    PennyLane will decompose any op for which this returns ``False``.
+    After ``defer_measurements`` has been applied, ``MidMeasureMP`` and
+    ``Conditional`` nodes will already have been removed, but we keep
+    them in the true-set as a safety net for when the stopping condition
+    is evaluated on pre-deferred tapes.
+    """
+    if isinstance(op, (MidMeasureMP, Conditional)):
+        return True
+    if isinstance(op, Adjoint):
+        base_name = op.base.name
+        return base_name in GATE_MAP or base_name in ADJOINT_MAP
+    return op.name in GATE_MAP
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +190,75 @@ class MaestroQubitDevice(Device):
         self._max_bond_dimension = max_bond_dimension
         self._singular_value_threshold = singular_value_threshold
         self._use_double_precision = use_double_precision
+
+    # ------------------------------------------------------------------
+    # Preprocessing
+    # ------------------------------------------------------------------
+
+    def preprocess_transforms(
+        self, execution_config: ExecutionConfig | None = None
+    ) -> CompilePipeline:
+        """Return the preprocessing pipeline for this device.
+
+        Mid-circuit measurement (MCM) strategy
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        Both ``mcm_method="one-shot"`` and ``mcm_method="deferred"`` are
+        handled by applying :func:`~pennylane.transforms.defer_measurements`
+        before gate decomposition.  This transform:
+
+        * Replaces every :class:`~pennylane.measurements.MidMeasureMP` with
+          an ancilla qubit and a CNOT gate (so the ancilla holds the MCM
+          outcome).
+        * Replaces every :class:`~pennylane.ops.op_math.Conditional`
+          (classically conditioned gate) with a controlled gate driven by
+          the corresponding ancilla qubit.
+        * Handles ``reset=True`` MCMs by adding an additional controlled-X
+          on the original wire (using the ancilla as control), resetting the
+          wire to |0> while the ancilla retains the measurement value.
+
+        The resulting tape contains only standard gates that are already in
+        Maestro's native gate set, so no Maestro-side API changes are
+        required.  For circuits without any MCMs the transform is a no-op,
+        leaving existing behaviour unchanged.
+        """
+        config = execution_config or ExecutionConfig()
+        mcm_method = (
+            config.mcm_config.mcm_method
+            if config.mcm_config is not None
+            else None
+        )
+
+        from pennylane.devices.preprocess import validate_device_wires
+
+        program = CompilePipeline()
+
+        # ── Wire validation ──────────────────────────────────────────────
+        # Expand wildcard measurements (qml.sample(), qml.counts() with no
+        # args) to the full device wire set *before* defer_measurements runs.
+        # Without this a 2-wire device that only has gates on wire 0 would
+        # return 1-column samples instead of 2-column samples.
+        program.add_transform(validate_device_wires, self.wires, name=self.name)
+
+        # ── MCM handling ────────────────────────────────────────────────
+        # defer_measurements is idempotent on circuits without MCMs, so we
+        # apply it unconditionally when the user has requested (or not
+        # yet specified) an MCM strategy.
+        if mcm_method in {"one-shot", "deferred", None}:
+            program.add_transform(
+                defer_measurements,
+                allow_postselect=False,
+            )
+
+        # ── Gate decomposition ──────────────────────────────────────────
+        # After deferral, the tape contains only standard gates.
+        # Decompose any gate not natively supported by the Maestro converter.
+        program.add_transform(
+            _decompose,
+            stopping_condition=_maestro_stopping_condition,
+            name=self.name,
+        )
+
+        return program
 
     # ------------------------------------------------------------------
     # Execution

@@ -2,6 +2,8 @@
 
 import numpy as np
 import pennylane as qml
+from pennylane.measurements import MidMeasureMP
+from pennylane.ops.op_math import Conditional
 from maestro.circuits import QuantumCircuit
 
 # ---------------------------------------------------------------------------
@@ -44,9 +46,28 @@ ADJOINT_MAP = {
 def _apply_operation(qc: QuantumCircuit, op: qml.operation.Operator) -> None:
     """Apply a single PennyLane operation to a Maestro QuantumCircuit.
 
-    Handles regular gates, adjoint wrappers, and parametric gates.
+    Handles regular gates, adjoint wrappers, parametric gates, and
+    mid-circuit measurements (with optional qubit reset).
     Wires must already be mapped to 0-indexed integers.
     """
+    # ── Mid-circuit measurement ───────────────────────────
+    if isinstance(op, MidMeasureMP):
+        wire = int(op.wires[0])
+        qc.measure(wire)
+        if op.reset:
+            qc.reset(wire)
+        return
+
+    # ── Conditional (classically-controlled) op ───────────
+    # After dynamic_one_shot these are resolved before reaching the
+    # device. If one slips through, raise a clear error.
+    if isinstance(op, Conditional):
+        raise ValueError(
+            "Conditional operations must be resolved before execution. "
+            "Use mcm_method='one-shot' so that PennyLane's dynamic_one_shot "
+            "transform resolves all Conditional ops into concrete gates."
+        )
+
     # ── Adjoint handling ──────────────────────────────────
     if isinstance(op, qml.ops.op_math.Adjoint):
         base = op.base

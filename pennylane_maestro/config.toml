@@ -28,10 +28,11 @@ CRX        = { properties = ["invertible", "differentiable"] }
 CRY        = { properties = ["invertible", "differentiable"] }
 CRZ        = { properties = ["invertible", "differentiable"] }
 ControlledPhaseShift = { properties = ["invertible", "differentiable"] }
-U3         = { properties = ["invertible", "differentiable"] }
+U3           = { properties = ["invertible", "differentiable"] }
 "Adjoint(S)"  = { }
 "Adjoint(T)"  = { }
 "Adjoint(SX)" = { }
+MidMeasureMP = { }
 
 # ──────────────────────────────────────────────────────────
 # Observables supported by the device for measurements.
@@ -73,4 +74,4 @@ dynamic_qubit_management     = false
 overlapping_observables      = true
 non_commuting_observables    = true
 initial_state_prep           = false
-supported_mcm_methods        = ["one-shot"]
+supported_mcm_methods        = ["one-shot", "deferred"]
