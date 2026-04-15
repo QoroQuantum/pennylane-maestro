@@ -23,7 +23,10 @@ from pennylane.measurements import (
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
 from pennylane.transforms import defer_measurements
-from pennylane.transforms.core import CompilePipeline
+try:
+    from pennylane.transforms.core import CompilePipeline
+except ImportError:
+    from pennylane.transforms.core import TransformProgram as CompilePipeline
 from pennylane.typing import Result, ResultBatch
 
 import maestro
