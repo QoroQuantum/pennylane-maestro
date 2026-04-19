@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Ising VQE Pipeline: PennyLane → Divi Cloud → IBM QPU
+Ising VQE Pipeline: PennyLane → Qoro Cloud → IBM QPU
 =====================================================
 
 Three-stage quantum computing workflow on the 1D transverse-field
