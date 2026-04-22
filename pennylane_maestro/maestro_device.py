@@ -23,6 +23,7 @@ except ImportError:
 from pennylane.typing import Result, ResultBatch
 
 import maestro
+from maestro import SimulatorConfig
 
 from pennylane_maestro.converter import (
     GATE_MAP,
@@ -193,6 +194,18 @@ class MaestroQubitDevice(Device):
         self._singular_value_threshold = singular_value_threshold
         self._use_double_precision = use_double_precision
 
+    def _build_config(self) -> SimulatorConfig:
+        """Build a Maestro ``SimulatorConfig`` from device settings."""
+        cfg = SimulatorConfig()
+        cfg.simulator_type = self._simulator_type
+        cfg.simulation_type = self._simulation_type
+        cfg.use_double_precision = self._use_double_precision
+        if self._max_bond_dimension is not None:
+            cfg.max_bond_dimension = self._max_bond_dimension
+        if self._singular_value_threshold is not None:
+            cfg.singular_value_threshold = self._singular_value_threshold
+        return cfg
+
     # ------------------------------------------------------------------
     # Preprocessing
     # ------------------------------------------------------------------
@@ -338,18 +351,9 @@ class MaestroQubitDevice(Device):
 
         # ── Slow path: full statevector ──
         qc = tape_to_maestro(tape, num_wires)
+        config = self._build_config()
 
-        kwargs = dict(
-            simulator_type=self._simulator_type,
-            simulation_type=self._simulation_type,
-            use_double_precision=self._use_double_precision,
-        )
-        if self._max_bond_dimension is not None:
-            kwargs["max_bond_dimension"] = self._max_bond_dimension
-        if self._singular_value_threshold is not None:
-            kwargs["singular_value_threshold"] = self._singular_value_threshold
-
-        amplitudes = qc.get_statevector(**kwargs)
+        amplitudes = qc.get_statevector(config)
         state = np.array(amplitudes, dtype=np.complex128)
         state = _lsb_to_msb_statevector(state, num_wires)
 
@@ -382,19 +386,9 @@ class MaestroQubitDevice(Device):
         # General path: sample from counts
         qc = tape_to_maestro(tape, num_wires)
         qc.measure_all()
+        config = self._build_config()
 
-        kwargs = dict(
-            simulator_type=self._simulator_type,
-            simulation_type=self._simulation_type,
-            shots=shots,
-            use_double_precision=self._use_double_precision,
-        )
-        if self._max_bond_dimension is not None:
-            kwargs["max_bond_dimension"] = self._max_bond_dimension
-        if self._singular_value_threshold is not None:
-            kwargs["singular_value_threshold"] = self._singular_value_threshold
-
-        raw = qc.execute(**kwargs)
+        raw = qc.execute(config, shots=shots)
         counts = raw["counts"]
 
         samples = _counts_to_samples(counts, num_wires)
@@ -436,18 +430,9 @@ class MaestroQubitDevice(Device):
 
         total_classical_bits = n_mcm_bits + num_wires
 
-        kwargs = dict(
-            simulator_type=self._simulator_type,
-            simulation_type=self._simulation_type,
-            shots=shots,
-            use_double_precision=self._use_double_precision,
-        )
-        if self._max_bond_dimension is not None:
-            kwargs["max_bond_dimension"] = self._max_bond_dimension
-        if self._singular_value_threshold is not None:
-            kwargs["singular_value_threshold"] = self._singular_value_threshold
+        config = self._build_config()
 
-        raw = qc.execute(**kwargs)
+        raw = qc.execute(config, shots=shots)
         counts = raw["counts"]
 
         # Build samples array: (shots, total_classical_bits)
@@ -518,17 +503,9 @@ class MaestroQubitDevice(Device):
             ps = observable_to_pauli_string(mp.obs, num_wires)
             pauli_strings.append(ps)
 
-        kwargs = dict(
-            simulator_type=self._simulator_type,
-            simulation_type=self._simulation_type,
-            use_double_precision=self._use_double_precision,
-        )
-        if self._max_bond_dimension is not None:
-            kwargs["max_bond_dimension"] = self._max_bond_dimension
-        if self._singular_value_threshold is not None:
-            kwargs["singular_value_threshold"] = self._singular_value_threshold
+        config = self._build_config()
 
-        raw = qc.estimate(observables=pauli_strings, **kwargs)
+        raw = qc.estimate(pauli_strings, config)
         exp_vals = raw["expectation_values"]
 
         # Handle SProd (scalar * Pauli) — multiply by the scalar
@@ -570,17 +547,9 @@ class MaestroQubitDevice(Device):
                 all_pauli_strings.append(ps)
             term_slices.append((start, len(terms), coeffs))
 
-        kwargs = dict(
-            simulator_type=self._simulator_type,
-            simulation_type=self._simulation_type,
-            use_double_precision=self._use_double_precision,
-        )
-        if self._max_bond_dimension is not None:
-            kwargs["max_bond_dimension"] = self._max_bond_dimension
-        if self._singular_value_threshold is not None:
-            kwargs["singular_value_threshold"] = self._singular_value_threshold
+        config = self._build_config()
 
-        raw = qc.estimate(observables=all_pauli_strings, **kwargs)
+        raw = qc.estimate(all_pauli_strings, config)
         all_exp_vals = raw["expectation_values"]
 
         # Reconstruct each Hamiltonian expval as Σ cᵢ⟨Pᵢ⟩
