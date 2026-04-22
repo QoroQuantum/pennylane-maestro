@@ -58,6 +58,16 @@ class TestBuildConfig:
         assert cfg.max_bond_dimension == default.max_bond_dimension
         assert cfg.singular_value_threshold == default.singular_value_threshold
 
+    def test_disable_optimized_swapping_config(self):
+        """disable_optimized_swapping flag propagates."""
+        dev_default = qml.device("maestro.qubit", wires=1)
+        assert dev_default._build_config().disable_optimized_swapping is False
+
+        dev_disabled = qml.device(
+            "maestro.qubit", wires=1, disable_optimized_swapping=True
+        )
+        assert dev_disabled._build_config().disable_optimized_swapping is True
+
 
 # ---------------------------------------------------------------------------
 # End-to-end execution through SimulatorConfig

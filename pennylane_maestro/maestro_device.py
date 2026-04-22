@@ -142,6 +142,10 @@ class MaestroQubitDevice(Device):
         max_bond_dimension (int or None): MPS truncation (default: None).
         singular_value_threshold (float or None): MPS SVD cutoff.
         use_double_precision (bool): Use FP64 on GPU (default: False).
+        disable_optimized_swapping (bool): Disable MPS swap optimisation
+            (default: False).  Automatically enabled for native MCM
+            circuits where the optimisation is incompatible with
+            mid-circuit measure/reset.
 
     Usage examples::
 
@@ -177,6 +181,7 @@ class MaestroQubitDevice(Device):
         max_bond_dimension=None,
         singular_value_threshold=None,
         use_double_precision: bool = False,
+        disable_optimized_swapping: bool = False,
     ):
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -193,6 +198,7 @@ class MaestroQubitDevice(Device):
         self._max_bond_dimension = max_bond_dimension
         self._singular_value_threshold = singular_value_threshold
         self._use_double_precision = use_double_precision
+        self._disable_optimized_swapping = disable_optimized_swapping
 
     def _build_config(self) -> SimulatorConfig:
         """Build a Maestro ``SimulatorConfig`` from device settings."""
@@ -204,6 +210,7 @@ class MaestroQubitDevice(Device):
             cfg.max_bond_dimension = self._max_bond_dimension
         if self._singular_value_threshold is not None:
             cfg.singular_value_threshold = self._singular_value_threshold
+        cfg.disable_optimized_swapping = self._disable_optimized_swapping
         return cfg
 
     # ------------------------------------------------------------------
@@ -431,6 +438,9 @@ class MaestroQubitDevice(Device):
         total_classical_bits = n_mcm_bits + num_wires
 
         config = self._build_config()
+        # MPS optimized swapping is incompatible with mid-circuit
+        # measure/reset — disable it for native MCM circuits.
+        config.disable_optimized_swapping = True
 
         raw = qc.execute(config, shots=shots)
         counts = raw["counts"]
