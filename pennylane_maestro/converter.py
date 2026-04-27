@@ -156,11 +156,12 @@ def tape_to_maestro(
     qc = QuantumCircuit()
 
     # Ensure Maestro allocates exactly `num_wires` qubits by touching
-    # every qubit with a no-op gate.  We use rz(q, 0.0) which is a true
-    # identity matrix but, unlike X;X, is not optimised away by the
-    # simulator's gate-cancellation pass.
+    # every qubit with a Clifford identity pair (Z;Z = I).  Using z;z
+    # rather than rz(q, 0.0) because the Stabilizer backend does not
+    # support parametric gates on large circuits.
     for q in range(num_wires):
-        qc.rz(q, 0.0)
+        qc.z(q)
+        qc.z(q)
 
     for op in tape.operations:
         _apply_operation(qc, op)
@@ -223,7 +224,8 @@ def tape_to_maestro_native(
 
     # Ensure Maestro allocates exactly `num_wires` qubits
     for q in range(num_wires):
-        qc.rz(q, 0.0)
+        qc.z(q)
+        qc.z(q)
 
     for op in tape.operations:
         _apply_operation(qc, op, mcm_tracker=tracker)

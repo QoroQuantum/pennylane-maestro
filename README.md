@@ -29,7 +29,7 @@ dev = qp.device("maestro.qubit", wires=20)
 pip install pennylane-maestro
 ```
 
-That's it. This installs `pennylane` (≥0.38) and `qoro-maestro` (≥0.2.8) automatically.
+That's it. This installs `pennylane` (≥0.38) and `qoro-maestro` (≥0.2.11) automatically.
 
 ## Quick Start
 
