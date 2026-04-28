@@ -21,7 +21,7 @@ dev = qp.device("maestro.qubit", wires=20)
 * **Iterate Faster** — Up to 20× faster statevector simulations for VQE/QAOA loops.
 * **Scale Up** — Simulate 1000+ qubits using Maestro's optimized MPS backend.
 * **Sample from MPS** — The only PennyLane MPS backend that supports shot-based sampling.
-* **GPU Ready** — [64× faster than PennyLane GPU](https://maestro.qoroquantum.net) on MPS workloads via cuQuantum.
+* **GPU Ready** — [Fast GPU simlation](https://maestro.qoroquantum.net) on MPS workloads via cuQuantum.
 
 ## Installation
 
