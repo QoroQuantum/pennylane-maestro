@@ -12,7 +12,7 @@ Drop-in replacement for `default.qubit` — one line change, same code, faster r
 # Before
 dev = qp.device("default.qubit", wires=20)
 
-# After — up to 20× faster
+# After 
 dev = qp.device("maestro.qubit", wires=20)
 ```
 
