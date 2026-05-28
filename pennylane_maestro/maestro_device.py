@@ -282,7 +282,13 @@ class MaestroQubitDevice(Device):
     ) -> Union[Result, ResultBatch]:
         results = []
         for tape in circuits:
-            results.append(self._execute_single(tape))
+            if tape.batch_size is not None:
+                from pennylane.transforms import broadcast_expand
+                tapes, fn = broadcast_expand(tape)
+                tape_results = [self._execute_single(t) for t in tapes]
+                results.append(fn(tape_results))
+            else:
+                results.append(self._execute_single(tape))
         return tuple(results)
 
     # ------------------------------------------------------------------

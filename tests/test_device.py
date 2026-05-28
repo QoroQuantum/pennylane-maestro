@@ -62,3 +62,17 @@ def test_parameter_broadcasting():
     res = circuit(params)
     assert np.allclose(res, np.cos(params))
 
+
+def test_parameter_broadcasting_direct_execution():
+    """Test that direct execution of a tape with broadcasted parameters is handled correctly."""
+    dev = qml.device("maestro.qubit", wires=2)
+    params = np.array([0.1, 0.2, 0.3])
+    tape = qml.tape.QuantumScript(
+        [qml.RX(params, wires=0)],
+        [qml.expval(qml.PauliZ(0))]
+    )
+    res = dev.execute([tape])
+    assert len(res) == 1
+    assert np.allclose(res[0], np.cos(params))
+
+

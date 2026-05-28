@@ -45,6 +45,19 @@ ADJOINT_MAP = {
 }
 
 
+def _to_float(p) -> float:
+    """Safely convert a parameter (which could be a NumPy/PyTorch/TensorFlow
+    scalar, 0-dim/1-dim/multi-dim single-element array, or python float)
+    into a Python float scalar.
+    """
+    if hasattr(p, "item"):
+        try:
+            return float(p.item())
+        except (ValueError, TypeError):
+            pass
+    return float(p)
+
+
 def _apply_operation(
     qc: QuantumCircuit,
     op: qml.operation.Operator,
@@ -107,7 +120,7 @@ def _apply_operation(
             method_name, has_params = GATE_MAP[base_name]
             wires = [int(w) for w in op.wires]
             if has_params:
-                params = [-float(p) for p in base.parameters]
+                params = [-_to_float(p) for p in base.parameters]
                 getattr(qc, method_name)(*wires, *params)
             else:
                 # Non-parametric gate without a native adjoint:
@@ -133,7 +146,7 @@ def _apply_operation(
     wires = [int(w) for w in op.wires]
 
     if has_params:
-        params = [float(p) for p in op.parameters]
+        params = [_to_float(p) for p in op.parameters]
         getattr(qc, method_name)(*wires, *params)
     else:
         getattr(qc, method_name)(*wires)
@@ -300,7 +313,7 @@ def decompose_hamiltonian_to_pauli_terms(
             ps = observable_to_pauli_string(op, num_wires)
             if ps is None:
                 return None
-            terms.append((float(coeff), ps))
+            terms.append((_to_float(coeff), ps))
         return terms
 
     # Sum: each operand may be an SProd or plain Pauli
@@ -311,7 +324,7 @@ def decompose_hamiltonian_to_pauli_terms(
                 ps = observable_to_pauli_string(operand.base, num_wires)
                 if ps is None:
                     return None
-                terms.append((float(operand.scalar), ps))
+                terms.append((_to_float(operand.scalar), ps))
             else:
                 ps = observable_to_pauli_string(operand, num_wires)
                 if ps is None:
