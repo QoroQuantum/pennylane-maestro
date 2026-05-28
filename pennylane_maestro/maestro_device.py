@@ -241,11 +241,15 @@ class MaestroQubitDevice(Device):
         )
 
         from pennylane.devices.preprocess import validate_device_wires
+        from pennylane.transforms import broadcast_expand
 
         program = CompilePipeline()
 
         # ── Wire validation ──────────────────────────────────────────────
         program.add_transform(validate_device_wires, self.wires, name=self.name)
+
+        # ── Parameter broadcasting / batching ───────────────────────────
+        program.add_transform(broadcast_expand)
 
         # ── MCM handling ────────────────────────────────────────────────
         # Only apply defer_measurements when explicitly requested.

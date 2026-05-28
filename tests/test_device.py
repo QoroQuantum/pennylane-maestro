@@ -47,3 +47,18 @@ def test_mps_args():
     )
     assert dev._max_bond_dimension == 4
     assert dev._singular_value_threshold == 1e-5
+
+
+def test_parameter_broadcasting():
+    """Test that the device supports parameter broadcasting/batching."""
+    dev = qml.device("maestro.qubit", wires=2)
+
+    @qml.qnode(dev)
+    def circuit(params):
+        qml.RX(params, wires=0)
+        return qml.expval(qml.PauliZ(0))
+
+    params = np.array([0.1, 0.2, 0.3])
+    res = circuit(params)
+    assert np.allclose(res, np.cos(params))
+
