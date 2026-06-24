@@ -604,9 +604,9 @@ class MaestroQubitDevice(Device):
         """Execute a tape containing ``qml.Snapshot`` operations.
 
         Builds a single Maestro ``QuantumCircuit`` incrementally.  At each
-        ``Snapshot`` op, evaluates the snapshot measurement via ``estimate()``
-        (fast path for Pauli expvals, MPS-compatible) or ``get_statevector()``
-        (fallback).  Results are stored in ``self._debugger.snapshots``.
+        group of consecutive ``Snapshot`` ops (no gates between them),
+        batches all Pauli-expval measurements into **one** ``estimate()``
+        call.  Non-Pauli snapshots fall back to ``get_statevector()``.
 
         Returns only the terminal measurement results; the ``qml.snapshots``
         transform wrapper adds ``"execution_results"`` to the debugger dict.
@@ -621,31 +621,28 @@ class MaestroQubitDevice(Device):
 
         config = self._build_config()
 
+        # Collect consecutive Snapshot ops so we can batch estimate()
+        pending_snapshots = []
+
         for op in tape.operations:
             if isinstance(op, Snapshot):
                 if self._debugger is not None and self._debugger.active:
-                    measurement = op.hyperparameters["measurement"]
-                    tag = (
-                        op.tag
-                        if op.tag is not None
-                        else len(self._debugger.snapshots)
-                    )
-                    snapshot_result = self._compute_snapshot(
-                        qc, measurement, num_wires, tape, config
-                    )
-                    # Store in debugger (same logic as default.qubit)
-                    if tag not in self._debugger.snapshots:
-                        self._debugger.snapshots[tag] = snapshot_result
-                    elif isinstance(self._debugger.snapshots[tag], list):
-                        self._debugger.snapshots[tag].append(snapshot_result)
-                    else:
-                        self._debugger.snapshots[tag] = [
-                            self._debugger.snapshots[tag],
-                            snapshot_result,
-                        ]
+                    pending_snapshots.append(op)
                 # Snapshot is a no-op on the quantum state
             else:
+                # Flush any pending snapshots before applying the next gate
+                if pending_snapshots:
+                    self._flush_snapshots(
+                        qc, pending_snapshots, num_wires, tape, config
+                    )
+                    pending_snapshots = []
                 _apply_operation(qc, op)
+
+        # Flush any trailing snapshots (at end of circuit, before terminal measurements)
+        if pending_snapshots:
+            self._flush_snapshots(
+                qc, pending_snapshots, num_wires, tape, config
+            )
 
         # ── Terminal measurements ──
         if not tape.measurements:
@@ -719,31 +716,63 @@ class MaestroQubitDevice(Device):
             return results[0]
         return results
 
-    def _compute_snapshot(
-        self,
-        qc,
-        measurement,
-        num_wires: int,
-        tape: QuantumScript,
-        config,
-    ):
-        """Evaluate a single snapshot measurement on the current circuit.
+    def _flush_snapshots(self, qc, snapshot_ops, num_wires, tape, config):
+        """Evaluate a batch of consecutive Snapshot ops efficiently.
 
-        Fast path: Pauli expval → ``estimate()`` (MPS-compatible).
-        Fallback: full statevector extraction via ``get_statevector()``.
+        All Pauli-expval snapshots in the batch are combined into a single
+        ``estimate()`` call.  Non-Pauli snapshots (e.g. full state) fall
+        back to ``get_statevector()`` (called at most once per batch).
         """
-        # Fast path: Pauli expval → use estimate()
-        if isinstance(measurement, ExpectationMP):
-            ps = observable_to_pauli_string(measurement.obs, num_wires)
-            if ps is not None:
-                raw = qc.estimate([ps], config)
-                ev = raw["expectation_values"][0]
+        # Separate into Pauli-batchable and fallback snapshots
+        pauli_batch = []    # (index, tag, measurement, pauli_string)
+        fallback_batch = [] # (tag, measurement)
+
+        for op in snapshot_ops:
+            measurement = op.hyperparameters["measurement"]
+            tag = (
+                op.tag
+                if op.tag is not None
+                else len(self._debugger.snapshots) + len(pauli_batch) + len(fallback_batch)
+            )
+
+            if isinstance(measurement, ExpectationMP):
+                ps = observable_to_pauli_string(measurement.obs, num_wires)
+                if ps is not None:
+                    pauli_batch.append((tag, measurement, ps))
+                    continue
+
+            fallback_batch.append((tag, measurement))
+
+        # ── Fast path: batch all Pauli expvals into ONE estimate() call ──
+        if pauli_batch:
+            pauli_strings = [ps for _, _, ps in pauli_batch]
+            raw = qc.estimate(pauli_strings, config)
+            exp_vals = raw["expectation_values"]
+
+            for (tag, measurement, _), ev in zip(pauli_batch, exp_vals):
                 if isinstance(measurement.obs, qml.ops.SProd):
                     ev = float(measurement.obs.scalar) * ev
-                return np.float64(ev)
+                self._store_snapshot(tag, np.float64(ev))
 
-        # Fallback: extract full statevector and process
-        amplitudes = qc.get_statevector(config)
-        state = np.array(amplitudes, dtype=np.complex128)
-        state = _lsb_to_msb_statevector(state, num_wires)
-        return measurement.process_state(state, tape.wires)
+        # ── Fallback: statevector for non-Pauli measurements ──
+        if fallback_batch:
+            amplitudes = qc.get_statevector(config)
+            state = np.array(amplitudes, dtype=np.complex128)
+            state = _lsb_to_msb_statevector(state, num_wires)
+
+            for tag, measurement in fallback_batch:
+                result = measurement.process_state(state, tape.wires)
+                self._store_snapshot(tag, result)
+
+    def _store_snapshot(self, tag, result):
+        """Store a snapshot result in the debugger (same logic as default.qubit)."""
+        if tag not in self._debugger.snapshots:
+            self._debugger.snapshots[tag] = result
+        elif isinstance(self._debugger.snapshots[tag], list):
+            self._debugger.snapshots[tag].append(result)
+        else:
+            self._debugger.snapshots[tag] = [
+                self._debugger.snapshots[tag],
+                result,
+            ]
+
