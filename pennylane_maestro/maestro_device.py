@@ -185,6 +185,9 @@ class MaestroQubitDevice(Device):
         singular_value_threshold=None,
         use_double_precision: bool = False,
         disable_optimized_swapping: bool = False,
+        pp_coefficient_threshold=None,
+        pp_pauli_weight_threshold=None,
+        pp_steps_between_trims=None,
     ):
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -202,6 +205,9 @@ class MaestroQubitDevice(Device):
         self._singular_value_threshold = singular_value_threshold
         self._use_double_precision = use_double_precision
         self._disable_optimized_swapping = disable_optimized_swapping
+        self._pp_coefficient_threshold = pp_coefficient_threshold
+        self._pp_pauli_weight_threshold = pp_pauli_weight_threshold
+        self._pp_steps_between_trims = pp_steps_between_trims
 
     def _build_config(self) -> SimulatorConfig:
         """Build a Maestro ``SimulatorConfig`` from device settings."""
@@ -214,6 +220,13 @@ class MaestroQubitDevice(Device):
         if self._singular_value_threshold is not None:
             cfg.singular_value_threshold = self._singular_value_threshold
         cfg.disable_optimized_swapping = self._disable_optimized_swapping
+        # PauliPropagator truncation settings
+        if self._pp_coefficient_threshold is not None:
+            cfg.pp_coefficient_threshold = self._pp_coefficient_threshold
+        if self._pp_pauli_weight_threshold is not None:
+            cfg.pp_pauli_weight_threshold = self._pp_pauli_weight_threshold
+        if self._pp_steps_between_trims is not None:
+            cfg.pp_steps_between_trims = self._pp_steps_between_trims
         return cfg
 
     # ------------------------------------------------------------------
@@ -724,8 +737,9 @@ class MaestroQubitDevice(Device):
         back to ``get_statevector()`` (called at most once per batch).
         """
         # Separate into Pauli-batchable and fallback snapshots
-        pauli_batch = []    # (index, tag, measurement, pauli_string)
-        fallback_batch = [] # (tag, measurement)
+        pauli_batch = []        # (tag, measurement, pauli_string)
+        hamiltonian_batch = []  # (tag, measurement, [(coeff, pauli_string), ...])
+        fallback_batch = []     # (tag, measurement)
 
         for op in snapshot_ops:
             measurement = op.hyperparameters["measurement"]
@@ -736,23 +750,61 @@ class MaestroQubitDevice(Device):
             )
 
             if isinstance(measurement, ExpectationMP):
+                # Try single Pauli string first
                 ps = observable_to_pauli_string(measurement.obs, num_wires)
                 if ps is not None:
                     pauli_batch.append((tag, measurement, ps))
                     continue
 
+                # Try Hamiltonian/Sum decomposition into Pauli terms
+                terms = decompose_hamiltonian_to_pauli_terms(
+                    measurement.obs, num_wires
+                )
+                if terms is not None:
+                    hamiltonian_batch.append((tag, measurement, terms))
+                    continue
+
             fallback_batch.append((tag, measurement))
 
         # ── Fast path: batch all Pauli expvals into ONE estimate() call ──
-        if pauli_batch:
-            pauli_strings = [ps for _, _, ps in pauli_batch]
-            raw = qc.estimate(pauli_strings, config)
+        # Collect ALL Pauli strings from both single-Pauli and Hamiltonian
+        # snapshots into one batch for a single estimate() call.
+        all_pauli_strings = []
+
+        # Single-Pauli snapshot indices
+        pauli_indices = []  # (tag, measurement, idx_in_all)
+        for tag, measurement, ps in pauli_batch:
+            pauli_indices.append((tag, measurement, len(all_pauli_strings)))
+            all_pauli_strings.append(ps)
+
+        # Hamiltonian snapshot slices
+        ham_slices = []  # (tag, start, count, coeffs)
+        for tag, measurement, terms in hamiltonian_batch:
+            start = len(all_pauli_strings)
+            coeffs = []
+            for coeff, ps in terms:
+                coeffs.append(coeff)
+                all_pauli_strings.append(ps)
+            ham_slices.append((tag, start, len(terms), coeffs))
+
+        if all_pauli_strings:
+            raw = qc.estimate(all_pauli_strings, config)
             exp_vals = raw["expectation_values"]
 
-            for (tag, measurement, _), ev in zip(pauli_batch, exp_vals):
+            # Store single-Pauli snapshots
+            for tag, measurement, idx in pauli_indices:
+                ev = exp_vals[idx]
                 if isinstance(measurement.obs, qml.ops.SProd):
                     ev = float(measurement.obs.scalar) * ev
                 self._store_snapshot(tag, np.float64(ev))
+
+            # Store Hamiltonian snapshots (weighted sum)
+            for tag, start, count, coeffs in ham_slices:
+                expval = sum(
+                    c * ev
+                    for c, ev in zip(coeffs, exp_vals[start : start + count])
+                )
+                self._store_snapshot(tag, np.float64(expval))
 
         # ── Fallback: statevector for non-Pauli measurements ──
         if fallback_batch:
