@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="pennylane-maestro",
-    version="0.3.0",
+    version="0.3.1",
     description="PennyLane plugin for the Maestro quantum simulator by Qoro Quantum",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
