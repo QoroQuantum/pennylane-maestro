@@ -13,6 +13,7 @@ from pennylane.devices import Device, ExecutionConfig
 from pennylane.devices.modifiers import simulator_tracking, single_tape_support
 from pennylane.devices.preprocess import decompose as _decompose
 from pennylane.measurements import ExpectationMP, MidMeasureMP, SampleMP
+from pennylane.ops import Snapshot
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
 from pennylane.transforms import defer_measurements
@@ -33,6 +34,7 @@ from pennylane_maestro.converter import (
     MCMTracker,
     observable_to_pauli_string,
     decompose_hamiltonian_to_pauli_terms,
+    _apply_operation,
 )
 
 # ---------------------------------------------------------------------------
@@ -104,7 +106,7 @@ def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
     them in the true-set as a safety net for when the stopping condition
     is evaluated on pre-deferred tapes.
     """
-    if isinstance(op, (MidMeasureMP, Conditional)):
+    if isinstance(op, (MidMeasureMP, Conditional, Snapshot)):
         return True
     if isinstance(op, Adjoint):
         base_name = op.base.name
@@ -171,6 +173,7 @@ class MaestroQubitDevice(Device):
 
     name = "maestro.qubit"
     config_filepath = path.join(path.dirname(__file__), "config.toml")
+    _debugger = None  # Snapshot compatibility — see pennylane.debugging.snapshot
 
     def __init__(
         self,
@@ -300,6 +303,13 @@ class MaestroQubitDevice(Device):
         # Map wires to consecutive 0-indexed integers
         tape = tape.map_to_standard_wires()
         num_wires = len(tape.wires) if len(tape.wires) > 0 else 1
+
+        # ── Snapshot path: incremental circuit building ──
+        has_snapshots = any(
+            isinstance(op, Snapshot) for op in tape.operations
+        )
+        if has_snapshots and not tape.shots:
+            return self._execute_with_snapshots(tape, num_wires)
 
         # Check if this tape has native MCMs (not yet deferred)
         has_mcm = any(
@@ -583,3 +593,157 @@ class MaestroQubitDevice(Device):
         if len(results) == 1:
             return results[0]
         return tuple(results)
+
+    # ------------------------------------------------------------------
+    # Snapshot execution (incremental circuit building)
+    # ------------------------------------------------------------------
+
+    def _execute_with_snapshots(
+        self, tape: QuantumScript, num_wires: int
+    ) -> Result:
+        """Execute a tape containing ``qml.Snapshot`` operations.
+
+        Builds a single Maestro ``QuantumCircuit`` incrementally.  At each
+        ``Snapshot`` op, evaluates the snapshot measurement via ``estimate()``
+        (fast path for Pauli expvals, MPS-compatible) or ``get_statevector()``
+        (fallback).  Results are stored in ``self._debugger.snapshots``.
+
+        Returns only the terminal measurement results; the ``qml.snapshots``
+        transform wrapper adds ``"execution_results"`` to the debugger dict.
+        """
+        from maestro.circuits import QuantumCircuit
+
+        qc = QuantumCircuit()
+        # Allocate qubits (same pattern as tape_to_maestro: Z;Z = I)
+        for q in range(num_wires):
+            qc.z(q)
+            qc.z(q)
+
+        config = self._build_config()
+
+        for op in tape.operations:
+            if isinstance(op, Snapshot):
+                if self._debugger is not None and self._debugger.active:
+                    measurement = op.hyperparameters["measurement"]
+                    tag = (
+                        op.tag
+                        if op.tag is not None
+                        else len(self._debugger.snapshots)
+                    )
+                    snapshot_result = self._compute_snapshot(
+                        qc, measurement, num_wires, tape, config
+                    )
+                    # Store in debugger (same logic as default.qubit)
+                    if tag not in self._debugger.snapshots:
+                        self._debugger.snapshots[tag] = snapshot_result
+                    elif isinstance(self._debugger.snapshots[tag], list):
+                        self._debugger.snapshots[tag].append(snapshot_result)
+                    else:
+                        self._debugger.snapshots[tag] = [
+                            self._debugger.snapshots[tag],
+                            snapshot_result,
+                        ]
+                # Snapshot is a no-op on the quantum state
+            else:
+                _apply_operation(qc, op)
+
+        # ── Terminal measurements ──
+        if not tape.measurements:
+            return ()
+
+        # Fast path: all Pauli expvals → estimate()
+        all_pauli_expval = all(
+            isinstance(mp, ExpectationMP)
+            and observable_to_pauli_string(mp.obs, num_wires) is not None
+            for mp in tape.measurements
+        )
+        if all_pauli_expval:
+            pauli_strings = [
+                observable_to_pauli_string(mp.obs, num_wires)
+                for mp in tape.measurements
+            ]
+            raw = qc.estimate(pauli_strings, config)
+            exp_vals = raw["expectation_values"]
+            results = []
+            for mp, ev in zip(tape.measurements, exp_vals):
+                if isinstance(mp.obs, qml.ops.SProd):
+                    ev = float(mp.obs.scalar) * ev
+                results.append(np.float64(ev))
+            if len(results) == 1:
+                return results[0]
+            return tuple(results)
+
+        # Fast path: Hamiltonian/Sum expvals → batched estimate()
+        all_hamiltonian_expval = all(
+            isinstance(mp, ExpectationMP)
+            and decompose_hamiltonian_to_pauli_terms(mp.obs, num_wires)
+            is not None
+            for mp in tape.measurements
+        )
+        if all_hamiltonian_expval:
+            all_pauli_strings = []
+            term_slices = []
+            for mp in tape.measurements:
+                terms = decompose_hamiltonian_to_pauli_terms(
+                    mp.obs, num_wires
+                )
+                start = len(all_pauli_strings)
+                coeffs = []
+                for coeff, ps in terms:
+                    coeffs.append(coeff)
+                    all_pauli_strings.append(ps)
+                term_slices.append((start, len(terms), coeffs))
+            raw = qc.estimate(all_pauli_strings, config)
+            all_exp_vals = raw["expectation_values"]
+            results = []
+            for start, count, coeffs in term_slices:
+                expval = sum(
+                    c * ev
+                    for c, ev in zip(
+                        coeffs, all_exp_vals[start : start + count]
+                    )
+                )
+                results.append(np.float64(expval))
+            if len(results) == 1:
+                return results[0]
+            return tuple(results)
+
+        # Slow path: full statevector
+        amplitudes = qc.get_statevector(config)
+        state = np.array(amplitudes, dtype=np.complex128)
+        state = _lsb_to_msb_statevector(state, num_wires)
+        results = tuple(
+            mp.process_state(state, tape.wires) for mp in tape.measurements
+        )
+        if len(tape.measurements) == 1:
+            return results[0]
+        return results
+
+    def _compute_snapshot(
+        self,
+        qc,
+        measurement,
+        num_wires: int,
+        tape: QuantumScript,
+        config,
+    ):
+        """Evaluate a single snapshot measurement on the current circuit.
+
+        Fast path: Pauli expval → ``estimate()`` (MPS-compatible).
+        Fallback: full statevector extraction via ``get_statevector()``.
+        """
+        # Fast path: Pauli expval → use estimate()
+        if isinstance(measurement, ExpectationMP):
+            ps = observable_to_pauli_string(measurement.obs, num_wires)
+            if ps is not None:
+                raw = qc.estimate([ps], config)
+                ev = raw["expectation_values"][0]
+                if isinstance(measurement.obs, qml.ops.SProd):
+                    ev = float(measurement.obs.scalar) * ev
+                return np.float64(ev)
+
+        # Fallback: extract full statevector and process
+        amplitudes = qc.get_statevector(config)
+        state = np.array(amplitudes, dtype=np.complex128)
+        state = _lsb_to_msb_statevector(state, num_wires)
+        return measurement.process_state(state, tape.wires)

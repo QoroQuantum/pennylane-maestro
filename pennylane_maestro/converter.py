@@ -77,6 +77,10 @@ def _apply_operation(
             via this tracker.  If ``None``, the legacy deferred path
             is used.
     """
+    # ── Snapshot pseudo-op (handled by device, not converter) ──
+    if isinstance(op, qml.Snapshot):
+        return
+
     # ── Mid-circuit measurement ───────────────────────────
     if isinstance(op, MidMeasureMP):
         wire = int(op.wires[0])
