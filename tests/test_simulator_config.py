@@ -68,6 +68,22 @@ class TestBuildConfig:
         )
         assert dev_disabled._build_config().disable_optimized_swapping is True
 
+    def test_pauli_propagator_config(self):
+        """Pauli propagator parameters are forwarded to the config."""
+        dev = qml.device(
+            "maestro.qubit",
+            wires=2,
+            simulation_type="PauliPropagator",
+            pp_coefficient_threshold=1e-4,
+            pp_pauli_weight_threshold=5,
+            pp_steps_between_trims=10,
+        )
+        cfg = dev._build_config()
+        assert cfg.simulation_type == maestro.SimulationType.PauliPropagator
+        assert cfg.pp_coefficient_threshold == pytest.approx(1e-4)
+        assert cfg.pp_pauli_weight_threshold == 5
+        assert cfg.pp_steps_between_trims == 10
+
 
 # ---------------------------------------------------------------------------
 # End-to-end execution through SimulatorConfig
@@ -175,3 +191,21 @@ class TestSimulatorConfigExecution:
         # Should be all "10"
         assert "10" in counts
         assert counts["10"] == 5000
+
+    def test_pauli_propagator_execution(self):
+        """Pauli propagator execution with SimulatorConfig."""
+        dev = qml.device(
+            "maestro.qubit",
+            wires=2,
+            simulation_type="PauliPropagator",
+            pp_coefficient_threshold=1e-5,
+        )
+
+        @qml.qnode(dev)
+        def circuit():
+            qml.PauliX(0)
+            return qml.expval(qml.PauliZ(0) @ qml.PauliZ(1))
+
+        res = circuit()
+        # Initial |00>, X on 0 gives |10>. Z@Z on |10> gives -1.
+        assert np.isclose(res, -1.0, atol=1e-6)

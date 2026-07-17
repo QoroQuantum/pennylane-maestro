@@ -201,6 +201,17 @@ class MaestroQubitDevice(Device):
         self._simulation_type = _resolve_enum(
             simulation_type, _SIMULATION_TYPE_MAP, "SimulationType"
         )
+
+        # Auto-initialize GPU backend when requested
+        if self._simulator_type == maestro.SimulatorType.Gpu:
+            if not maestro.init_gpu():
+                warnings.warn(
+                    "maestro.init_gpu() failed — GPU simulation may "
+                    "fall back to CPU silently.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         self._max_bond_dimension = max_bond_dimension
         self._singular_value_threshold = singular_value_threshold
         self._use_double_precision = use_double_precision
