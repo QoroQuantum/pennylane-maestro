@@ -17,7 +17,7 @@ setup(
     },
     install_requires=[
         "pennylane>=0.38",
-        "qoro-maestro>=0.2.11",
+        "qoro-maestro>=0.2.19",
         "numpy",
     ],
     entry_points={

@@ -207,8 +207,11 @@ class MCMTracker:
         """Allocate a new classical bit for a mid-circuit measurement."""
         bit_idx = self._next_bit
         self._next_bit += 1
-        if op.id is not None:
+        if getattr(op, "meas_uid", None) is not None:
+            self.id_to_bit[op.meas_uid] = bit_idx
+        elif getattr(op, "id", None) is not None:
             self.id_to_bit[op.id] = bit_idx
+        self.id_to_bit[id(op)] = bit_idx
         return bit_idx
 
     @property
@@ -297,6 +300,50 @@ def observable_to_pauli_string(
     return None
 
 
+def extract_pauli_terms(
+    obs: qml.operation.Operator,
+    num_wires: int,
+) -> list[tuple[float, str]] | None:
+    """Extract ``[(coefficient, pauli_string), ...]`` from an observable.
+
+    Supports single Paulis, Tensor Products (Prod), Scalar Products (SProd),
+    Hamiltonians, LinearCombinations, and Sums. Returns None if any term
+    cannot be converted to a Pauli representation.
+    """
+    try:
+        ps_sentence = qml.pauli.pauli_sentence(obs)
+        if ps_sentence is None or len(ps_sentence) == 0:
+            return None
+        terms = []
+        for pw, coeff in ps_sentence.items():
+            chars = ["I"] * num_wires
+            for w, p in pw.items():
+                w_idx = int(w)
+                if w_idx >= num_wires:
+                    return None
+                chars[w_idx] = p
+            terms.append((float(np.real(coeff)), "".join(chars)))
+        return terms
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    # Fallback to older structural check if pauli_sentence fails
+    if hasattr(obs, "coeffs") and hasattr(obs, "ops"):
+        terms = []
+        for coeff, op in zip(obs.coeffs, obs.ops):
+            ps = observable_to_pauli_string(op, num_wires)
+            if ps is None:
+                return None
+            terms.append((_to_float(coeff), ps))
+        return terms
+
+    ps = observable_to_pauli_string(obs, num_wires)
+    if ps is not None:
+        return [(1.0, ps)]
+
+    return None
+
+
 def decompose_hamiltonian_to_pauli_terms(
     obs: qml.operation.Operator,
     num_wires: int,
@@ -310,31 +357,22 @@ def decompose_hamiltonian_to_pauli_terms(
     (one simulator pass) rather than PennyLane splitting them into
     separate tapes executed independently.
     """
-    # Hamiltonian / LinearCombination: has .coeffs and .ops
-    if hasattr(obs, "coeffs") and hasattr(obs, "ops"):
-        terms = []
-        for coeff, op in zip(obs.coeffs, obs.ops):
-            ps = observable_to_pauli_string(op, num_wires)
-            if ps is None:
-                return None
-            terms.append((_to_float(coeff), ps))
-        return terms
+    return extract_pauli_terms(obs, num_wires)
 
-    # Sum: each operand may be an SProd or plain Pauli
-    if isinstance(obs, qml.ops.Sum):
-        terms = []
-        for operand in obs.operands:
-            if isinstance(operand, qml.ops.SProd):
-                ps = observable_to_pauli_string(operand.base, num_wires)
-                if ps is None:
-                    return None
-                terms.append((_to_float(operand.scalar), ps))
-            else:
-                ps = observable_to_pauli_string(operand, num_wires)
-                if ps is None:
-                    return None
-                terms.append((1.0, ps))
-        return terms
 
-    return None
+
+def operations_to_maestro(operations, num_wires: int) -> QuantumCircuit:
+    """Convert an iterable of PennyLane operations into a Maestro QuantumCircuit.
+
+    Ensures Maestro allocates exactly ``num_wires`` qubits.
+    """
+    qc = QuantumCircuit()
+    for q in range(num_wires):
+        qc.z(q)
+        qc.z(q)
+
+    for op in operations:
+        _apply_operation(qc, op)
+
+    return qc
 

@@ -35,6 +35,9 @@ from pennylane_maestro.converter import (
     observable_to_pauli_string,
     decompose_hamiltonian_to_pauli_terms,
     _apply_operation,
+    operations_to_maestro,
+    extract_pauli_terms,
+    _to_float,
 )
 
 # ---------------------------------------------------------------------------
@@ -67,6 +70,10 @@ def _lsb_to_msb_statevector(state: np.ndarray, num_wires: int) -> np.ndarray:
     """
     n = num_wires
     size = 1 << n
+    if len(state) < size:
+        padded = np.zeros(size, dtype=state.dtype)
+        padded[: len(state)] = state
+        state = padded
     # Build a permutation: for each index i, reverse its n-bit representation
     perm = np.zeros(size, dtype=np.intp)
     for i in range(size):
@@ -91,6 +98,199 @@ def _counts_to_samples(counts: dict, num_wires: int) -> np.ndarray:
         for _ in range(count):
             samples.append(row)
     return np.array(samples, dtype=np.int64)
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Trotter snapshot detection & incremental evolution
+# ---------------------------------------------------------------------------
+
+def _ops_equal(op1: qml.operation.Operator, op2: qml.operation.Operator) -> bool:
+    """Check if two PennyLane operations are identical in gate, wires, and parameters."""
+    if op1.name != op2.name or op1.wires != op2.wires:
+        return False
+    if len(op1.parameters) != len(op2.parameters):
+        return False
+    for p1, p2 in zip(op1.parameters, op2.parameters):
+        try:
+            if not np.isclose(_to_float(p1), _to_float(p2)):
+                return False
+        except (TypeError, ValueError):
+            if p1 != p2:
+                return False
+    return True
+
+
+def _blocks_equal(block1: list, block2: list) -> bool:
+    """Check if two lists of operations are identical."""
+    if len(block1) != len(block2):
+        return False
+    return all(_ops_equal(o1, o2) for o1, o2 in zip(block1, block2))
+
+
+def _detect_trotter_snapshot_pattern(operations, measurements, num_wires: int):
+    """Detect if a sequence of operations is a Trotterized evolution with intermediate snapshots.
+
+    Returns a dict with pattern details, or None if the pattern does not match.
+    """
+    gate_segments = []
+    snapshot_clusters = []
+    current_gates = []
+    current_snaps = []
+
+    for op in operations:
+        if isinstance(op, Snapshot):
+            if current_gates:
+                gate_segments.append(current_gates)
+                current_gates = []
+            elif not gate_segments and not snapshot_clusters:
+                gate_segments.append([])
+            current_snaps.append(op)
+        else:
+            if current_snaps:
+                snapshot_clusters.append(current_snaps)
+                current_snaps = []
+            current_gates.append(op)
+
+    if current_snaps:
+        snapshot_clusters.append(current_snaps)
+    gate_segments.append(current_gates)
+
+    if not snapshot_clusters:
+        return None
+
+    # Check that all snapshots have Pauli / Hamiltonian expectation values
+    parsed_snapshot_terms = []
+    for cluster in snapshot_clusters:
+        cluster_terms = []
+        for snap_op in cluster:
+            m = snap_op.hyperparameters.get("measurement")
+            if m is None:
+                # Full state snapshot -> cannot use Pauli incremental_evolve
+                return None
+            if isinstance(m, (list, tuple)):
+                op_terms = []
+                for sub_m in m:
+                    if not isinstance(sub_m, ExpectationMP):
+                        return None
+                    terms = extract_pauli_terms(sub_m.obs, num_wires)
+                    if terms is None:
+                        return None
+                    op_terms.append(terms)
+                cluster_terms.append((snap_op, op_terms, True))
+            else:
+                if not isinstance(m, ExpectationMP):
+                    return None
+                terms = extract_pauli_terms(m.obs, num_wires)
+                if terms is None:
+                    return None
+                cluster_terms.append((snap_op, terms, False))
+        parsed_snapshot_terms.append(cluster_terms)
+
+    # Check terminal measurements (must also be Pauli/Hamiltonian expvals, or empty)
+    terminal_terms = []
+    for m in measurements:
+        if not isinstance(m, ExpectationMP):
+            return None
+        terms = extract_pauli_terms(m.obs, num_wires)
+        if terms is None:
+            return None
+        terminal_terms.append(terms)
+
+    m = len(snapshot_clusters)
+    G0 = gate_segments[0]
+    candidate_step = None
+    step_multiples = []
+
+    if m >= 2:
+        G1 = gate_segments[1]
+        if not G1:
+            return None
+
+        len_G1 = len(G1)
+        base_block = None
+        for k in range(1, len_G1 + 1):
+            if len_G1 % k == 0:
+                sub = G1[:k]
+                reps = len_G1 // k
+                if all(_blocks_equal(G1[i * k : (i + 1) * k], sub) for i in range(reps)):
+                    base_block = sub
+                    break
+        if not base_block:
+            return None
+
+        candidate_step = base_block
+        k = len(candidate_step)
+
+        for j in range(1, m):
+            Gj = gate_segments[j]
+            if len(Gj) == 0 or len(Gj) % k != 0:
+                return None
+            reps = len(Gj) // k
+            if not all(_blocks_equal(Gj[i * k : (i + 1) * k], candidate_step) for i in range(reps)):
+                return None
+            step_multiples.append(reps)
+
+        len_G0 = len(G0)
+        n0 = 0
+        rem_len = len_G0
+        while rem_len >= k and _blocks_equal(G0[rem_len - k : rem_len], candidate_step):
+            n0 += 1
+            rem_len -= k
+
+        if n0 < 1:
+            return None
+
+        init_ops = G0[:rem_len]
+
+    else:
+        # m == 1: single snapshot cluster. Find repeating suffix of G0
+        len_G0 = len(G0)
+        found = False
+        for k in range(1, len_G0 // 2 + 1):
+            sub = G0[len_G0 - k : len_G0]
+            n_reps = 0
+            rem_len = len_G0
+            while rem_len >= k and _blocks_equal(G0[rem_len - k : rem_len], sub):
+                n_reps += 1
+                rem_len -= k
+            if n_reps >= 1:
+                candidate_step = sub
+                init_ops = G0[:rem_len]
+                n0 = n_reps
+                found = True
+                break
+        if not found:
+            return None
+
+    Gm = gate_segments[m]
+    k = len(candidate_step)
+    if len(Gm) > 0:
+        if len(Gm) % k != 0:
+            return None
+        n_trailing = len(Gm) // k
+        if not all(_blocks_equal(Gm[i * k : (i + 1) * k], candidate_step) for i in range(n_trailing)):
+            return None
+    else:
+        n_trailing = 0
+
+    steps = []
+    curr_step = n0
+    steps.append(curr_step)
+    for reps in step_multiples:
+        curr_step += reps
+        steps.append(curr_step)
+
+    final_step = curr_step + n_trailing
+
+    return {
+        "init_ops": init_ops,
+        "step_ops": candidate_step,
+        "steps": steps,
+        "snapshot_clusters": snapshot_clusters,
+        "parsed_snapshot_terms": parsed_snapshot_terms,
+        "terminal_terms": terminal_terms,
+        "final_step": final_step,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +702,15 @@ class MaestroQubitDevice(Device):
             if hasattr(mp, 'mv') and mp.mv is not None:
                 # This is a measurement of an MCM value (e.g. qml.sample(m))
                 # Find which classical bit(s) this MeasurementValue references
-                mcm_ids = [mid_mp.id for mid_mp in mp.mv.measurements]
+                mcm_ids = []
+                for mid_mp in mp.mv.measurements:
+                    meas_uid = getattr(mid_mp, "meas_uid", None)
+                    if meas_uid is not None and meas_uid in tracker.id_to_bit:
+                        mcm_ids.append(meas_uid)
+                    elif getattr(mid_mp, "id", None) is not None and mid_mp.id in tracker.id_to_bit:
+                        mcm_ids.append(mid_mp.id)
+                    elif id(mid_mp) in tracker.id_to_bit:
+                        mcm_ids.append(id(mid_mp))
                 if len(mcm_ids) == 1 and mcm_ids[0] in tracker.id_to_bit:
                     bit_idx = tracker.id_to_bit[mcm_ids[0]]
                     # Extract the column for this classical bit
@@ -619,7 +827,7 @@ class MaestroQubitDevice(Device):
         return tuple(results)
 
     # ------------------------------------------------------------------
-    # Snapshot execution (incremental circuit building)
+    # Snapshot execution (incremental circuit building / persistent evolution)
     # ------------------------------------------------------------------
 
     def _execute_with_snapshots(
@@ -627,14 +835,23 @@ class MaestroQubitDevice(Device):
     ) -> Result:
         """Execute a tape containing ``qml.Snapshot`` operations.
 
-        Builds a single Maestro ``QuantumCircuit`` incrementally.  At each
-        group of consecutive ``Snapshot`` ops (no gates between them),
-        batches all Pauli-expval measurements into **one** ``estimate()``
-        call.  Non-Pauli snapshots fall back to ``get_statevector()``.
+        Fast path: if the tape follows a Trotterized time-evolution pattern
+        (an optional initial state followed by repeated step blocks separated
+        by Pauli/Hamiltonian snapshots), uses Maestro's ``incremental_evolve``
+        for persistent-state execution with O(N) cost instead of O(N^2).
 
-        Returns only the terminal measurement results; the ``qml.snapshots``
-        transform wrapper adds ``"execution_results"`` to the debugger dict.
+        Fallback path: builds a single Maestro ``QuantumCircuit`` incrementally,
+        batching Pauli expvals into ``estimate()`` calls and non-Pauli snapshots
+        into ``get_statevector()``.
         """
+        # ── Fast path: persistent incremental evolve ──
+        pattern = _detect_trotter_snapshot_pattern(
+            tape.operations, tape.measurements, num_wires
+        )
+        if pattern is not None:
+            return self._execute_incremental_snapshots(tape, num_wires, pattern)
+
+        # ── Fallback: sequential accumulating circuit building ──
         from maestro.circuits import QuantumCircuit
 
         qc = QuantumCircuit()
@@ -838,4 +1055,191 @@ class MaestroQubitDevice(Device):
                 self._debugger.snapshots[tag],
                 result,
             ]
+
+    def _execute_incremental_snapshots(
+        self, tape: QuantumScript, num_wires: int, pattern: dict
+    ) -> Result:
+        """Execute Trotterized evolution with snapshots via maestro.incremental_evolve."""
+        init_circuit = operations_to_maestro(pattern["init_ops"], num_wires)
+        trotter_step = operations_to_maestro(pattern["step_ops"], num_wires)
+
+        all_paulis = []
+
+        def _add_pauli(ps: str):
+            if ps not in all_paulis:
+                all_paulis.append(ps)
+
+        for cluster_terms in pattern["parsed_snapshot_terms"]:
+            for snap_op, terms, is_list in cluster_terms:
+                if is_list:
+                    for sub_terms in terms:
+                        for coeff, ps in sub_terms:
+                            _add_pauli(ps)
+                else:
+                    for coeff, ps in terms:
+                        _add_pauli(ps)
+
+        for terms in pattern["terminal_terms"]:
+            for coeff, ps in terms:
+                _add_pauli(ps)
+
+        measure_at_steps = sorted(
+            list(
+                set(
+                    pattern["steps"]
+                    + ([pattern["final_step"]] if pattern["terminal_terms"] else [])
+                )
+            )
+        )
+
+        config = self._build_config()
+
+        raw = maestro.incremental_evolve(
+            init_circuit,
+            trotter_step,
+            measure_at_steps,
+            all_paulis,
+            config,
+        )
+
+        raw_exp = raw["expectation_values"]
+        step_val_map = {}
+        for idx, s in enumerate(measure_at_steps):
+            step_val_map[s] = {
+                ps: raw_exp[idx][p_idx] for p_idx, ps in enumerate(all_paulis)
+            }
+
+        # Populate snapshots in debugger
+        if self._debugger is not None and self._debugger.active:
+            for step, cluster_terms in zip(
+                pattern["steps"], pattern["parsed_snapshot_terms"]
+            ):
+                vals = step_val_map[step]
+                for snap_op, terms, is_list in cluster_terms:
+                    tag = (
+                        snap_op.tag
+                        if snap_op.tag is not None
+                        else len(self._debugger.snapshots)
+                    )
+                    if is_list:
+                        res_list = [
+                            np.float64(sum(c * vals[ps] for c, ps in sub_terms))
+                            for sub_terms in terms
+                        ]
+                        self._store_snapshot(tag, res_list)
+                    else:
+                        val = sum(c * vals[ps] for c, ps in terms)
+                        self._store_snapshot(tag, np.float64(val))
+
+        # Reconstruct terminal measurements
+        if not pattern["terminal_terms"]:
+            return ()
+
+        final_vals = step_val_map[pattern["final_step"]]
+        results = []
+        for terms in pattern["terminal_terms"]:
+            val = sum(c * final_vals[ps] for c, ps in terms)
+            results.append(np.float64(val))
+
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
+
+    def incremental_evolve(
+        self,
+        init,
+        trotter_step,
+        measure_at_steps,
+        observables,
+    ):
+        """Perform persistent incremental time evolution using Maestro's incremental_evolve.
+
+        Executes ``init`` once, then applies ``trotter_step`` incrementally, evaluating
+        expectation values for ``observables`` at each step in ``measure_at_steps``
+        without re-simulating from scratch.
+
+        Args:
+            init (callable, list[Operator], or QuantumCircuit): Initial state preparation.
+            trotter_step (callable, list[Operator], or QuantumCircuit): Single Trotter step.
+            measure_at_steps (Sequence[int]): Step indices at which to measure.
+            observables (list[Operator] or list[str]): Observables to evaluate.
+
+        Returns:
+            dict: with keys:
+                - ``"expectation_values"``: NumPy array of shape ``(len(measure_at_steps), len(observables))``
+                - ``"steps"``: list of measured step indices
+                - ``"time_taken"``: total elapsed seconds
+                - ``"time_per_step"``: seconds per step interval
+                - ``"dynamic_bond_dims"``: bond dimensions per step (for MPS)
+                - ``"max_bond_dim_reached"``: max bond dimension reached
+        """
+        num_wires = len(self.wires) if len(self.wires) > 0 else 1
+
+        def _to_qc(item):
+            if isinstance(item, maestro.circuits.QuantumCircuit):
+                return item
+            if callable(item):
+                with qml.queuing.AnnotatedQueue() as q:
+                    item()
+                ops = q.queue
+            elif hasattr(item, "operations"):
+                ops = item.operations
+            elif isinstance(item, (list, tuple)):
+                ops = list(item)
+            else:
+                raise TypeError(f"Unsupported circuit type for incremental_evolve: {type(item)}")
+
+            tape = qml.tape.QuantumScript(ops)
+            pipeline = self.preprocess_transforms()
+            tapes, _ = pipeline([tape])
+            return operations_to_maestro(tapes[0].operations, num_wires)
+
+        init_circuit = _to_qc(init)
+        step_circuit = _to_qc(trotter_step)
+
+        obs_terms = []
+        all_paulis = []
+
+        def _add_p(ps):
+            if ps not in all_paulis:
+                all_paulis.append(ps)
+
+        for obs in observables:
+            if isinstance(obs, str):
+                _add_p(obs)
+                obs_terms.append([(1.0, obs)])
+            else:
+                terms = extract_pauli_terms(obs, num_wires)
+                if terms is None:
+                    raise ValueError(f"Observable {obs} cannot be represented as a Pauli string.")
+                for c, ps in terms:
+                    _add_p(ps)
+                obs_terms.append(terms)
+
+        config = self._build_config()
+        raw = maestro.incremental_evolve(
+            init_circuit,
+            step_circuit,
+            sorted(list(measure_at_steps)),
+            all_paulis,
+            config,
+        )
+
+        raw_exp = raw["expectation_values"]
+        measured_steps = raw["steps"]
+
+        results_matrix = np.zeros((len(measured_steps), len(observables)), dtype=np.float64)
+        for idx, s in enumerate(measured_steps):
+            vals = {ps: raw_exp[idx][p_idx] for p_idx, ps in enumerate(all_paulis)}
+            for obs_idx, terms in enumerate(obs_terms):
+                results_matrix[idx, obs_idx] = sum(c * vals[ps] for c, ps in terms)
+
+        return {
+            "expectation_values": results_matrix,
+            "steps": measured_steps,
+            "time_taken": raw.get("time_taken"),
+            "time_per_step": raw.get("time_per_step"),
+            "dynamic_bond_dims": raw.get("dynamic_bond_dims"),
+            "max_bond_dim_reached": raw.get("max_bond_dim_reached"),
+        }
 
