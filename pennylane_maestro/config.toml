@@ -33,6 +33,7 @@ U3           = { properties = ["invertible", "differentiable"] }
 "Adjoint(T)"  = { }
 "Adjoint(SX)" = { }
 MidMeasureMP = { }
+Delay        = { }
 
 # ──────────────────────────────────────────────────────────
 # Observables supported by the device for measurements.

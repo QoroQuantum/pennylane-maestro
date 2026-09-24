@@ -122,3 +122,17 @@ class TestConverter:
         # Unsupported observables for estimate()
         obs6 = qml.Hadamard(0)
         assert observable_to_pauli_string(obs6, 2) is None
+
+    def test_delay_operation(self):
+        """Test conversion of Delay operation to Maestro circuit."""
+        class Delay(qml.operation.Operation):
+            num_wires = 1
+            num_params = 1
+
+        tape = qml.tape.QuantumScript([
+            qml.PauliX(wires=0),
+            Delay(0.5, wires=0),
+        ]).map_to_standard_wires()
+
+        qc = tape_to_maestro(tape, 1)
+        assert qc.num_qubits == 1

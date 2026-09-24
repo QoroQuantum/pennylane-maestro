@@ -12,13 +12,13 @@ production with a single codebase.
   Stage 3 — Hardware:   Divi + IBM QPU (same MC optimizer)
 
 Requirements:
-    pip install pennylane-maestro divi matplotlib numpy
+    pip install pennylane-maestro divi numpy
 """
 
 import time
 import numpy as np
 import pennylane as qml
-import matplotlib.pyplot as plt
+
 
 
 # ── Configuration ─────────────────────────────────────────────────────
@@ -180,7 +180,7 @@ print(f"  Done — best E = {vqe_qpu.best_loss:.6f}  ({stage3_time:.1f}s)\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Summary + Plot
+# Summary
 # ═══════════════════════════════════════════════════════════════════════
 
 print("=" * 50)
@@ -192,23 +192,3 @@ valid_s3 = [e for e in stage3_energies if np.isfinite(e)]
 print(f"{'3. QPU':<20} {min(valid_s3):>10.4f} {stage3_time:>7.1f}s")
 print(f"{'Exact':<20} {exact_energy:>10.4f}")
 print("=" * 50)
-
-# ── Convergence plot ──
-x1 = np.arange(len(stage1_energies))
-x2 = np.arange(len(stage2_energies)) + len(stage1_energies)
-x3 = np.arange(len(valid_s3)) + len(stage1_energies) + len(stage2_energies)
-
-fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(x1, stage1_energies, "o-", label="Stage 1: PennyLane + Maestro MPS")
-ax.plot(x2, stage2_energies, "s-", label="Stage 2: Divi + Qoro Cloud")
-ax.plot(x3, valid_s3,        "D-", label="Stage 3: Divi + IBM QPU")
-ax.axhline(exact_energy, color="green", linestyle=":", label=f"Exact E₀ = {exact_energy:.4f}")
-ax.set_xlabel("Optimization Step")
-ax.set_ylabel("Energy ⟨H⟩")
-ax.set_title(f"Ising VQE Pipeline — {N_QUBITS} qubits")
-ax.legend()
-ax.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("ising_vqe_pipeline.png", dpi=150)
-print("\nPlot saved → ising_vqe_pipeline.png")

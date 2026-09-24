@@ -76,3 +76,18 @@ def test_parameter_broadcasting_direct_execution():
     assert np.allclose(res[0], np.cos(params))
 
 
+def test_delay_execution():
+    """Test executing a circuit with Delay operation."""
+    class Delay(qml.operation.Operation):
+        num_wires = 1
+        num_params = 1
+
+    dev = qml.device("maestro.qubit", wires=1)
+
+    @qml.qnode(dev)
+    def circuit():
+        qml.PauliX(0)
+        Delay(0.1, wires=0)
+        return qml.expval(qml.PauliZ(0))
+
+    assert np.isclose(circuit(), -1.0)

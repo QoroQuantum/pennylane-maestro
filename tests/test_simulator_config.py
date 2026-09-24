@@ -84,6 +84,45 @@ class TestBuildConfig:
         assert cfg.pp_pauli_weight_threshold == 5
         assert cfg.pp_steps_between_trims == 10
 
+    def test_seed_config(self):
+        """Seed setting propagates to SimulatorConfig."""
+        dev = qml.device("maestro.qubit", wires=1, seed=42)
+        cfg = dev._build_config()
+        assert cfg.seed == 42
+        assert dev.seed == 42
+
+    def test_seed_reproducibility(self):
+        """Identical seeds produce identical shot measurement counts."""
+        dev1 = qml.device("maestro.qubit", wires=2, shots=100, seed=12345)
+        dev2 = qml.device("maestro.qubit", wires=2, shots=100, seed=12345)
+
+        @qml.qnode(dev1)
+        def circuit1():
+            qml.Hadamard(0)
+            qml.CNOT([0, 1])
+            return qml.counts()
+
+        @qml.qnode(dev2)
+        def circuit2():
+            qml.Hadamard(0)
+            qml.CNOT([0, 1])
+            return qml.counts()
+
+        assert circuit1() == circuit2()
+
+    def test_new_simulator_and_simulation_types(self):
+        """Verify new Maestro 0.3.x simulator and simulation types resolve."""
+        dev_aer = qml.device("maestro.qubit", wires=1, simulator_type="QiskitAer")
+        assert dev_aer._simulator_type == maestro.SimulatorType.QiskitAer
+
+        dev_dist = qml.device("maestro.qubit", wires=1, simulator_type="DistributedGpu")
+        assert dev_dist._simulator_type == maestro.SimulatorType.DistributedGpu
+
+        dev_mpo = qml.device(
+            "maestro.qubit", wires=1, simulation_type="MatrixProductOperator"
+        )
+        assert dev_mpo._simulation_type == maestro.SimulationType.MatrixProductOperator
+
 
 # ---------------------------------------------------------------------------
 # End-to-end execution through SimulatorConfig

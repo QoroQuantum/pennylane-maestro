@@ -107,6 +107,13 @@ def _apply_operation(
             "transform resolves all Conditional ops into concrete gates."
         )
 
+    # ── Delay operation ───────────────────────────────────
+    if op.name == "Delay":
+        wire = int(op.wires[0])
+        duration = float(op.parameters[0])
+        qc.delay(wire, duration)
+        return
+
     # ── Adjoint handling ──────────────────────────────────
     if isinstance(op, qml.ops.op_math.Adjoint):
         base = op.base

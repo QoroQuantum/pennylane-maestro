@@ -308,6 +308,8 @@ def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
     """
     if isinstance(op, (MidMeasureMP, Conditional, Snapshot)):
         return True
+    if op.name == "Delay":
+        return True
     if isinstance(op, Adjoint):
         base_name = op.base.name
         return base_name in GATE_MAP or base_name in ADJOINT_MAP
@@ -331,6 +333,11 @@ class MaestroQubitDevice(Device):
             - ``"QCSim"`` — Qoro's optimised CPU simulator (default)
             - ``"Gpu"`` — CUDA-accelerated GPU simulator
             - ``"CompositeQCSim"`` — Multi-node distributed CPU
+            - ``"QiskitAer"`` — Integrated Qiskit Aer backend
+            - ``"CompositeQiskitAer"`` — Distributed Qiskit Aer backend
+            - ``"DistributedGpu"`` — State distributed across local GPUs
+            - ``"DistributedMpiGpu"`` — State distributed across MPI ranks/GPUs
+            - ``"QuestSim"`` — QuEST simulator
 
         simulation_type (str): Simulation algorithm. Options:
 
@@ -340,6 +347,9 @@ class MaestroQubitDevice(Device):
             - ``"TensorNetwork"`` — General tensor network
             - ``"PauliPropagator"`` — Pauli propagation
             - ``"ExtendedStabilizer"`` — Extended stabilizer
+            - ``"DensityMatrix"`` — Density matrix for mixed states
+            - ``"MatrixProductOperator"`` — MPO simulation
+            - ``"PathIntegral"`` — Path integral simulation
 
         max_bond_dimension (int or None): MPS truncation (default: None).
         singular_value_threshold (float or None): MPS SVD cutoff.
@@ -348,6 +358,8 @@ class MaestroQubitDevice(Device):
             (default: False).  Automatically enabled for native MCM
             circuits where the optimisation is incompatible with
             mid-circuit measure/reset.
+        seed (int, np.random.Generator, or None): Random seed for reproducible
+            stochastic simulations (sampling, measurements, noise).
 
     Usage examples::
 
@@ -369,6 +381,9 @@ class MaestroQubitDevice(Device):
         # Stabilizer for Clifford circuits
         dev = qml.device("maestro.qubit", wires=1000,
                          simulation_type="Stabilizer")
+
+        # Reproducible random sampling with seed
+        dev = qml.device("maestro.qubit", wires=5, shots=1000, seed=42)
     """
 
     name = "maestro.qubit"
@@ -388,6 +403,7 @@ class MaestroQubitDevice(Device):
         pp_coefficient_threshold=None,
         pp_pauli_weight_threshold=None,
         pp_steps_between_trims=None,
+        seed=None,
     ):
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -419,6 +435,20 @@ class MaestroQubitDevice(Device):
         self._pp_coefficient_threshold = pp_coefficient_threshold
         self._pp_pauli_weight_threshold = pp_pauli_weight_threshold
         self._pp_steps_between_trims = pp_steps_between_trims
+        if seed is not None:
+            if isinstance(seed, (int, np.integer)):
+                self._seed = int(seed)
+            elif hasattr(seed, "integers"):
+                self._seed = int(seed.integers(0, 2**31 - 1))
+            else:
+                self._seed = int(seed)
+        else:
+            self._seed = None
+
+    @property
+    def seed(self) -> int | None:
+        """Return the random seed configured on the device."""
+        return self._seed
 
     def _build_config(self) -> SimulatorConfig:
         """Build a Maestro ``SimulatorConfig`` from device settings."""
@@ -438,6 +468,8 @@ class MaestroQubitDevice(Device):
             cfg.pp_pauli_weight_threshold = self._pp_pauli_weight_threshold
         if self._pp_steps_between_trims is not None:
             cfg.pp_steps_between_trims = self._pp_steps_between_trims
+        if self._seed is not None:
+            cfg.seed = self._seed
         return cfg
 
     # ------------------------------------------------------------------
