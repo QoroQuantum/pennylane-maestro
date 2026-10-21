@@ -21,6 +21,7 @@ dev = qp.device("maestro.qubit", wires=20)
 * **Iterate Faster** — Up to 20× faster statevector simulations for VQE/QAOA loops.
 * **Scale Up** — Simulate 1000+ qubits using Maestro's optimized MPS backend.
 * **Sample from MPS** — The only PennyLane MPS backend that supports shot-based sampling.
+* **Persistent-State Trotter Evolution** — Linear-time simulation of repeated Trotter steps with intermediate snapshots (`qp.Snapshot` or `incremental_evolve`).
 * **GPU Ready** — [Fast GPU simulation](https://maestro.qoroquantum.net) on MPS workloads via cuQuantum.
 
 ## Installation
@@ -96,8 +97,8 @@ dev = qp.device("maestro.qubit", wires=100,
 dev = qp.device("maestro.qubit", wires=1000,
                 simulation_type="Stabilizer")
 
-# Finite shots
-dev = qp.device("maestro.qubit", wires=10, shots=10_000)
+# Finite shots with reproducible seed
+dev = qp.device("maestro.qubit", wires=10, shots=10_000, seed=42)
 
 # GPU (requires separate license — see below)
 dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu")
@@ -110,7 +111,12 @@ dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu")
 |---|---|
 | `"QCSim"` | Qoro's optimized CPU simulator **(default)** |
 | `"Gpu"` | CUDA-accelerated GPU simulator |
-| `"CompositeQCSim"` | p-block simulation |
+| `"CompositeQCSim"` | Multi-node distributed CPU |
+| `"QiskitAer"` | Integrated Qiskit Aer backend |
+| `"CompositeQiskitAer"` | Distributed Qiskit Aer backend |
+| `"DistributedGpu"` | State distributed across local GPUs |
+| `"DistributedMpiGpu"` | State distributed across MPI ranks/GPUs |
+| `"QuestSim"` | QuEST simulator |
 
 | `simulation_type` | Description |
 |---|---|
@@ -120,6 +126,9 @@ dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu")
 | `"TensorNetwork"` | General tensor network |
 | `"PauliPropagator"` | Pauli propagation |
 | `"ExtendedStabilizer"` | Extended stabilizer |
+| `"DensityMatrix"` | Density matrix for mixed states |
+| `"MatrixProductOperator"` | MPO simulation |
+| `"PathIntegral"` | Path integral simulation |
 
 </details>
 
@@ -193,13 +202,61 @@ energy = vqe_circuit(params)
 gradient = qp.grad(vqe_circuit)(params)
 ```
 
+### Incremental Trotter Evolution & Snapshots
+
+Time evolution algorithms often measure expectation values across intermediate steps. Standard simulation re-runs from time $t=0$ for each step (quadratic $O(N^2)$ cost). Maestro retains persistent simulator state across steps for linear $O(N)$ execution.
+
+#### Via PennyLane Snapshots (Automatic Acceleration)
+
+When a circuit repeats a Trotter step with intermediate `qp.Snapshot` calls, `maestro.qubit` automatically detects the pattern and uses Maestro's persistent-state execution:
+
+```python
+import pennylane as qp
+
+dev = qp.device("maestro.qubit", wires=2)
+
+@qp.qnode(dev)
+def trotter_circuit():
+    qp.PauliX(0)
+    for step in range(1, 4):
+        qp.IsingXX(0.2, wires=[0, 1])
+        qp.Snapshot(f"step_{step}", measurement=qp.expval(qp.PauliZ(0)))
+    return qp.expval(qp.PauliZ(0))
+
+results = qp.snapshots(trotter_circuit)()
+# results contains "step_1", "step_2", "step_3", and "execution_results"
+```
+
+#### Via Direct Incremental Evolution API
+
+For large workloads (e.g. 100+ steps on MPS), bypass tape generation entirely with `incremental_evolve`:
+
+```python
+import pennylane as qp
+from pennylane_maestro import incremental_evolve
+
+dev = qp.device("maestro.qubit", wires=2, simulation_type="MatrixProductState")
+
+res = dev.incremental_evolve(
+    init=lambda: qp.PauliX(0),
+    trotter_step=lambda: qp.IsingXX(0.2, wires=[0, 1]),
+    measure_at_steps=[10, 20, 30],
+    observables=[qp.PauliZ(0), qp.PauliZ(1)],
+)
+# res["expectation_values"] has shape (len(measure_at_steps), len(observables))
+```
+
 ### 100-Qubit Ising Quench with MPS Shot Sampling
 
 See [`examples/ising_phase_transition.py`](examples/ising_phase_transition.py) for a full demo that simulates a 100-qubit transverse-field Ising model and uses Maestro's exclusive MPS shot sampling to extract magnetization distributions and spatial correlations. Runs in ~30 seconds.
 
 ### Supported Operations
 
-PennyLane automatically decomposes any unsupported gate (e.g. `Rot`) into Maestro's native gate set. No manual intervention needed.
+* **Automatic Gate Decomposition** — PennyLane decomposes any unsupported gate (e.g. `Rot`) into Maestro's native gate set automatically.
+* **Mid-Circuit Measurements (MCM)** — Supports mid-circuit measurements (`qp.measure`), resets, and conditional operations (`qp.cond`).
+* **Snapshots** — Native support for `qp.Snapshot` with batched Pauli expectation estimation.
+* **Parameter Broadcasting** — Direct batch evaluation across parameter dimensions.
+* **Delay** — Native support for `qp.Delay` timing operations.
 
 ---
 
