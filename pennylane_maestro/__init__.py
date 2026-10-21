@@ -8,5 +8,5 @@ def incremental_evolve(dev, init, trotter_step, measure_at_steps, observables):
     return dev.incremental_evolve(init, trotter_step, measure_at_steps, observables)
 
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 __all__ = ["MaestroQubitDevice", "incremental_evolve"]
