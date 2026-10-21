@@ -29,7 +29,7 @@ dev = qp.device("maestro.qubit", wires=20)
 pip install pennylane-maestro
 ```
 
-That's it. This installs `pennylane` (≥0.38) and `qoro-maestro` (≥0.2.11) automatically.
+That's it. This installs `pennylane` (≥0.38) and `qoro-maestro` (≥0.3.7) automatically.
 
 ## Quick Start
 
@@ -122,6 +122,44 @@ dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu")
 | `"ExtendedStabilizer"` | Extended stabilizer |
 
 </details>
+
+### Device options
+
+Further keyword arguments map onto Maestro's `SimulatorConfig`:
+
+```python
+# Double precision on GPU / Qiskit Aer
+dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu",
+                precision="double")
+
+# Pauli propagation with truncation
+dev = qp.device("maestro.qubit", wires=200,
+                simulation_type="PauliPropagator",
+                pp_max_pauli_weight=8, pp_gates_between_trims=10)
+
+# Force gate fusion on; turn off pre-execution reductions
+dev = qp.device("maestro.qubit", wires=20, gate_fusion=True,
+                enable_causal_cone_reduction=False, auto_reduce=False)
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `precision` | `None` | `"single"` or `"double"` for GPU and Qiskit Aer backends. `None` keeps each backend's default; QCSim always uses double. |
+| `max_bond_dimension` | `None` | MPS bond-dimension cap. |
+| `singular_value_threshold` | `None` | MPS SVD truncation cutoff. |
+| `disable_optimized_swapping` | `False` | Disable MPS swap optimisation. |
+| `pp_coefficient_threshold` | `None` | PauliPropagator: drop Pauli strings with smaller coefficients. |
+| `pp_max_pauli_weight` | `None` | PauliPropagator: drop Pauli strings acting on more qubits than this. |
+| `pp_gates_between_trims` | `None` | PauliPropagator: gates between truncation passes. |
+| `pp_gates_between_deduplications` | `None` | PauliPropagator: gates between merges of duplicate strings. |
+| `enable_causal_cone_reduction` | `True` | Simulate only the causal cone of the measured observables. |
+| `auto_reduce` | `True` | Detect invariant subspaces and simulate the reduced register. |
+| `enable_observable_clustering` | `True` | Split multi-observable estimates into groups with disjoint lightcones. Requires a Maestro release newer than 0.3.7; ignored otherwise. |
+| `max_cluster_qubits` | `None` | Cap each observable cluster at this many lightcone qubits. Requires a Maestro release newer than 0.3.7; ignored otherwise. |
+| `gate_fusion` | `None` | Fuse compatible gates. `None` uses each backend's default. |
+| `seed` | `None` | Seed for reproducible sampling and noise. |
+
+`use_double_precision=True/False` is still accepted as shorthand for `precision="double"/"single"`. The legacy names `pp_pauli_weight_threshold` (→ `pp_max_pauli_weight`) and `pp_steps_between_trims` (→ `pp_gates_between_trims`) still work but emit a `DeprecationWarning`.
 
 ## Examples
 

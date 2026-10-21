@@ -1,0 +1,31 @@
+{
+  "title": "Maestro",
+  "description": "`maestro.qubit` is a high-performance C++ quantum simulator by Qoro Quantum.\n\nRecommended for:\n\n- Statevector simulations with 20+ qubits requiring maximum speed.\n- Large-scale circuits (100+ qubits) using the MPS backend.\n- Shot-based sampling from MPS states.\n- Native mid-circuit measurements with true wavefunction collapse.\n- GPU-accelerated simulation via a custom CUDA MPS backend.",
+  "thumbnail": "https://drive.google.com/file/d/1bivNNHK_m6NZNTc5gyY7ZkBxmWicvWVt/view?usp=sharing",
+  "features": [
+    "Statevector, MPS, Stabilizer, Tensor Network, Pauli Propagator, and Path Integral backends",
+    "100+ qubit MPS simulation",
+    "Shot-based MPS sampling (unique to Maestro)",
+    "GPU acceleration via custom CUDA MPS Backend",
+    "Native mid-circuit measurements",
+    "Batched Hamiltonian evaluation in a single C++ call",
+    "Automatic gate decomposition"
+  ],
+  "compatibility": [
+    "GPU",
+    "CPU"
+  ],
+  "os": [
+    "LINUX",
+    "MACOS",
+    "WINDOWS"
+  ],
+  "weight": 0,
+  "builtByPennyLane": false,
+  "includedInPennyLane": false,
+  "warning": "GPU acceleration (`simulator_type=\"Gpu\"`) requires a separate license from [Qoro Quantum](https://maestro.qoroquantum.net). CPU-based simulation is available to all users.",
+  "relatedContent": [],
+  "external": {
+    "url": "https://github.com/QoroQuantum/pennylane-maestro"
+  }
+}

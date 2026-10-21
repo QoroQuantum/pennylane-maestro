@@ -60,6 +60,50 @@ def _resolve_enum(value, enum_map, enum_name: str):
     return value
 
 
+_PRECISIONS = ("single", "double")
+
+
+def _resolve_precision(precision, use_double_precision):
+    """Combine ``precision`` and the legacy ``use_double_precision`` flag.
+
+    Returns ``"single"``, ``"double"`` or ``None`` (keep the backend default).
+    """
+    if precision is not None and precision not in _PRECISIONS:
+        raise ValueError(
+            f"Unknown precision '{precision}'. Valid options: {list(_PRECISIONS)}"
+        )
+    if use_double_precision is None:
+        return precision
+    legacy = "double" if use_double_precision else "single"
+    if precision is not None and precision != legacy:
+        raise ValueError(
+            f"Conflicting settings: precision='{precision}' and "
+            f"use_double_precision={use_double_precision}."
+        )
+    return legacy
+
+
+def _resolve_alias(value, legacy_value, name: str, legacy_name: str):
+    """Merge a renamed keyword argument with its deprecated legacy name."""
+    if legacy_value is None:
+        return value
+    warnings.warn(
+        f"'{legacy_name}' is deprecated; use '{name}' instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    if value is not None and value != legacy_value:
+        raise ValueError(
+            f"Conflicting settings: {name}={value} and {legacy_name}={legacy_value}."
+        )
+    return legacy_value
+
+
+# Observable clustering landed in Maestro after the 0.3.7 release; forward it
+# only when the installed SimulatorConfig exposes it.
+_SUPPORTS_OBSERVABLE_CLUSTERING = hasattr(SimulatorConfig(), "max_cluster_qubits")
+
+
 def _lsb_to_msb_statevector(state: np.ndarray, num_wires: int) -> np.ndarray:
     """Reorder a statevector from Maestro's LSB-first convention to
     PennyLane's MSB-first convention.
@@ -105,17 +149,22 @@ def _counts_to_samples(counts: dict, num_wires: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _ops_equal(op1: qml.operation.Operator, op2: qml.operation.Operator) -> bool:
-    """Check if two PennyLane operations are identical in gate, wires, and parameters."""
+    """Check if two PennyLane operations are identical in gate, wires, and parameters.
+
+    Parameters must match exactly: a tolerance would let a slowly varying
+    schedule collapse into one repeated step and silently simulate the
+    wrong angles.  Genuine Trotter steps rebuild bit-identical parameters.
+    """
     if op1.name != op2.name or op1.wires != op2.wires:
         return False
     if len(op1.parameters) != len(op2.parameters):
         return False
     for p1, p2 in zip(op1.parameters, op2.parameters):
         try:
-            if not np.isclose(_to_float(p1), _to_float(p2)):
+            if _to_float(p1) != _to_float(p2):
                 return False
         except (TypeError, ValueError):
-            if p1 != p2:
+            if not np.array_equal(qml.math.to_numpy(p1), qml.math.to_numpy(p2)):
                 return False
     return True
 
@@ -353,11 +402,39 @@ class MaestroQubitDevice(Device):
 
         max_bond_dimension (int or None): MPS truncation (default: None).
         singular_value_threshold (float or None): MPS SVD cutoff.
-        use_double_precision (bool): Use FP64 on GPU (default: False).
+        precision (str or None): Floating-point precision, ``"single"`` or
+            ``"double"``, for the GPU and Qiskit Aer backends.  ``None``
+            (default) keeps each backend's default; QCSim always uses double.
+        use_double_precision (bool or None): Legacy alias for ``precision``:
+            ``True`` → ``"double"``, ``False`` → ``"single"``.
         disable_optimized_swapping (bool): Disable MPS swap optimisation
             (default: False).  Automatically enabled for native MCM
             circuits where the optimisation is incompatible with
             mid-circuit measure/reset.
+        pp_coefficient_threshold (float or None): PauliPropagator — drop
+            Pauli strings with smaller coefficients.
+        pp_max_pauli_weight (int or None): PauliPropagator — drop Pauli
+            strings acting on more qubits than this.
+        pp_gates_between_trims (int or None): PauliPropagator — gates
+            applied between truncation passes.
+        pp_gates_between_deduplications (int or None): PauliPropagator —
+            gates applied between merges of duplicate Pauli strings.
+        pp_pauli_weight_threshold: Deprecated alias for ``pp_max_pauli_weight``.
+        pp_steps_between_trims: Deprecated alias for ``pp_gates_between_trims``.
+        enable_causal_cone_reduction (bool): Simulate only the causal cone of
+            the measured observables (default: True).
+        auto_reduce (bool): Detect invariant subspaces (e.g. from checks)
+            and simulate the reduced register (default: True).
+        enable_observable_clustering (bool): With causal-cone reduction,
+            split multi-observable estimates into groups with disjoint
+            lightcones, each simulated on its own register (default: True).
+            Requires a Maestro release newer than 0.3.7; ignored otherwise.
+        max_cluster_qubits (int or None): With observable clustering, cap
+            each group at this many lightcone qubits.  ``None`` (default)
+            keeps overlapping lightcones together.  Requires a Maestro
+            release newer than 0.3.7; ignored otherwise.
+        gate_fusion (bool or None): Fuse compatible gates.  ``None``
+            (default) uses each backend's default.
         seed (int, np.random.Generator, or None): Random seed for reproducible
             stochastic simulations (sampling, measurements, noise).
 
@@ -371,7 +448,7 @@ class MaestroQubitDevice(Device):
 
         # GPU with double precision
         dev = qml.device("maestro.qubit", wires=20,
-                         simulator_type="Gpu", use_double_precision=True)
+                         simulator_type="Gpu", precision="double")
 
         # MPS for large qubit counts
         dev = qml.device("maestro.qubit", wires=100,
@@ -398,11 +475,20 @@ class MaestroQubitDevice(Device):
         simulation_type: str = "Statevector",
         max_bond_dimension=None,
         singular_value_threshold=None,
-        use_double_precision: bool = False,
+        precision: str | None = None,
+        use_double_precision: bool | None = None,
         disable_optimized_swapping: bool = False,
         pp_coefficient_threshold=None,
+        pp_max_pauli_weight=None,
+        pp_gates_between_trims=None,
+        pp_gates_between_deduplications=None,
         pp_pauli_weight_threshold=None,
         pp_steps_between_trims=None,
+        enable_causal_cone_reduction: bool = True,
+        auto_reduce: bool = True,
+        enable_observable_clustering: bool = True,
+        max_cluster_qubits: int | None = None,
+        gate_fusion: bool | None = None,
         seed=None,
     ):
         with warnings.catch_warnings():
@@ -430,11 +516,33 @@ class MaestroQubitDevice(Device):
 
         self._max_bond_dimension = max_bond_dimension
         self._singular_value_threshold = singular_value_threshold
-        self._use_double_precision = use_double_precision
+        self._precision = _resolve_precision(precision, use_double_precision)
         self._disable_optimized_swapping = disable_optimized_swapping
         self._pp_coefficient_threshold = pp_coefficient_threshold
-        self._pp_pauli_weight_threshold = pp_pauli_weight_threshold
-        self._pp_steps_between_trims = pp_steps_between_trims
+        self._pp_max_pauli_weight = _resolve_alias(
+            pp_max_pauli_weight, pp_pauli_weight_threshold,
+            "pp_max_pauli_weight", "pp_pauli_weight_threshold",
+        )
+        self._pp_gates_between_trims = _resolve_alias(
+            pp_gates_between_trims, pp_steps_between_trims,
+            "pp_gates_between_trims", "pp_steps_between_trims",
+        )
+        self._pp_gates_between_deduplications = pp_gates_between_deduplications
+        self._enable_causal_cone_reduction = enable_causal_cone_reduction
+        self._auto_reduce = auto_reduce
+        self._enable_observable_clustering = enable_observable_clustering
+        self._max_cluster_qubits = max_cluster_qubits
+        self._gate_fusion = gate_fusion
+        if not _SUPPORTS_OBSERVABLE_CLUSTERING and (
+            not enable_observable_clustering or max_cluster_qubits is not None
+        ):
+            warnings.warn(
+                "The installed qoro-maestro does not support observable "
+                "clustering; 'enable_observable_clustering' and "
+                "'max_cluster_qubits' are ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
         if seed is not None:
             if isinstance(seed, (int, np.integer)):
                 self._seed = int(seed)
@@ -455,7 +563,8 @@ class MaestroQubitDevice(Device):
         cfg = SimulatorConfig()
         cfg.simulator_type = self._simulator_type
         cfg.simulation_type = self._simulation_type
-        cfg.use_double_precision = self._use_double_precision
+        if self._precision is not None:
+            cfg.precision = self._precision
         if self._max_bond_dimension is not None:
             cfg.max_bond_dimension = self._max_bond_dimension
         if self._singular_value_threshold is not None:
@@ -464,10 +573,19 @@ class MaestroQubitDevice(Device):
         # PauliPropagator truncation settings
         if self._pp_coefficient_threshold is not None:
             cfg.pp_coefficient_threshold = self._pp_coefficient_threshold
-        if self._pp_pauli_weight_threshold is not None:
-            cfg.pp_pauli_weight_threshold = self._pp_pauli_weight_threshold
-        if self._pp_steps_between_trims is not None:
-            cfg.pp_steps_between_trims = self._pp_steps_between_trims
+        if self._pp_max_pauli_weight is not None:
+            cfg.pp_max_pauli_weight = self._pp_max_pauli_weight
+        if self._pp_gates_between_trims is not None:
+            cfg.pp_gates_between_trims = self._pp_gates_between_trims
+        if self._pp_gates_between_deduplications is not None:
+            cfg.pp_gates_between_deduplications = self._pp_gates_between_deduplications
+        # Pre-execution reductions and gate fusion
+        cfg.enable_causal_cone_reduction = self._enable_causal_cone_reduction
+        cfg.auto_reduce = self._auto_reduce
+        if _SUPPORTS_OBSERVABLE_CLUSTERING:
+            cfg.enable_observable_clustering = self._enable_observable_clustering
+            cfg.max_cluster_qubits = self._max_cluster_qubits
+        cfg.gate_fusion = self._gate_fusion
         if self._seed is not None:
             cfg.seed = self._seed
         return cfg
@@ -1206,6 +1324,8 @@ class MaestroQubitDevice(Device):
                 - ``"max_bond_dim_reached"``: max bond dimension reached
         """
         num_wires = len(self.wires) if len(self.wires) > 0 else 1
+        # Map device wire labels to consecutive 0-indexed qubits
+        wire_map = {w: i for i, w in enumerate(self.wires)}
 
         def _to_qc(item):
             if isinstance(item, maestro.circuits.QuantumCircuit):
@@ -1224,7 +1344,10 @@ class MaestroQubitDevice(Device):
             tape = qml.tape.QuantumScript(ops)
             pipeline = self.preprocess_transforms()
             tapes, _ = pipeline([tape])
-            return operations_to_maestro(tapes[0].operations, num_wires)
+            ops = tapes[0].operations
+            if wire_map:
+                ops = [qml.map_wires(op, wire_map) for op in ops]
+            return operations_to_maestro(ops, num_wires)
 
         init_circuit = _to_qc(init)
         step_circuit = _to_qc(trotter_step)
@@ -1241,6 +1364,8 @@ class MaestroQubitDevice(Device):
                 _add_p(obs)
                 obs_terms.append([(1.0, obs)])
             else:
+                if wire_map:
+                    obs = qml.map_wires(obs, wire_map)
                 terms = extract_pauli_terms(obs, num_wires)
                 if terms is None:
                     raise ValueError(f"Observable {obs} cannot be represented as a Pauli string.")

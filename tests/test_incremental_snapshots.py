@@ -70,6 +70,12 @@ class TestTrotterSnapshotPatternDetection:
         pattern = _detect_trotter_snapshot_pattern(ops, measurements, num_wires)
         assert pattern is None
 
+    def test_ops_equal_requires_exact_parameters(self):
+        """Nearly equal parameters are distinct gates, not a repeated step."""
+        assert _ops_equal(qml.RZ(40.0, wires=0), qml.RZ(40.0, wires=0))
+        assert not _ops_equal(qml.RZ(40.0, wires=0), qml.RZ(40.0003, wires=0))
+        assert not _ops_equal(qml.RZ(5e-9, wires=0), qml.RZ(1e-8, wires=0))
+
     def test_full_state_snapshot_returns_none(self):
         """Snapshots requesting full state cannot use Pauli incremental_evolve."""
         num_wires = 2
@@ -298,8 +304,50 @@ class TestTrotterSnapshotExecution:
         )
 
 
+    def test_near_equal_segments_match_default_qubit(self):
+        """Segments whose angles differ within np.isclose tolerance stay distinct."""
+
+        def circuit():
+            qml.Hadamard(0)
+            for _ in range(1000):
+                qml.RZ(40.0, wires=0)
+            qml.Snapshot("seg1", measurement=qml.expval(qml.PauliX(0)))
+            for _ in range(1000):
+                qml.RZ(40.0003, wires=0)
+            qml.Snapshot("seg2", measurement=qml.expval(qml.PauliX(0)))
+            return qml.expval(qml.PauliX(0))
+
+        res = qml.snapshots(qml.QNode(circuit, qml.device("maestro.qubit", wires=1)))()
+        ref = qml.snapshots(qml.QNode(circuit, qml.device("default.qubit", wires=1)))()
+        for key in ("seg1", "seg2", "execution_results"):
+            assert np.isclose(res[key], ref[key], atol=1e-6)
+
+
 class TestDirectIncrementalEvolveAPI:
     """Test device.incremental_evolve direct method and top-level function."""
+
+    @pytest.mark.parametrize("wires", [["a", "b"], [0, 2], [3, 1]])
+    def test_direct_api_custom_wire_labels(self, wires):
+        """Device wire labels are mapped to qubit indices for ops and observables."""
+        w0, w1 = wires
+        dev = qml.device("maestro.qubit", wires=wires)
+
+        res = dev.incremental_evolve(
+            init=lambda: qml.PauliX(w0),
+            trotter_step=lambda: qml.IsingXX(0.3, wires=[w0, w1]),
+            measure_at_steps=[1, 2],
+            observables=[qml.PauliZ(w0), qml.PauliZ(w1)],
+        )
+
+        @qml.qnode(qml.device("default.qubit", wires=wires))
+        def reference(n_steps):
+            qml.PauliX(w0)
+            for _ in range(n_steps):
+                qml.IsingXX(0.3, wires=[w0, w1])
+            return qml.expval(qml.PauliZ(w0)), qml.expval(qml.PauliZ(w1))
+
+        expected = np.array([reference(1), reference(2)])
+        np.testing.assert_allclose(res["expectation_values"], expected, atol=1e-7)
 
     def test_direct_api_with_callables(self):
         """Direct incremental_evolve using python callables for init and step."""

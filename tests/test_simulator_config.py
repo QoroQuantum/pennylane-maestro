@@ -1,4 +1,4 @@
-"""Tests for SimulatorConfig integration (qoro-maestro ≥ 0.2.11).
+"""Tests for SimulatorConfig integration (qoro-maestro ≥ 0.3.7).
 
 Verifies that the device correctly builds a ``maestro.SimulatorConfig``
 from user-provided settings and passes it through every execution path.
@@ -10,7 +10,10 @@ import pennylane as qml
 
 import maestro
 from maestro import SimulatorConfig
-from pennylane_maestro.maestro_device import MaestroQubitDevice
+from pennylane_maestro.maestro_device import (
+    MaestroQubitDevice,
+    _SUPPORTS_OBSERVABLE_CLUSTERING,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +30,7 @@ class TestBuildConfig:
         assert isinstance(cfg, SimulatorConfig)
         assert cfg.simulator_type == maestro.SimulatorType.QCSim
         assert cfg.simulation_type == maestro.SimulationType.Statevector
-        assert cfg.use_double_precision is False
+        assert cfg.precision is None
 
     def test_mps_config(self):
         """MPS settings are forwarded to the config."""
@@ -43,11 +46,40 @@ class TestBuildConfig:
         assert cfg.max_bond_dimension == 32
         assert cfg.singular_value_threshold == pytest.approx(1e-8)
 
-    def test_double_precision_config(self):
-        """use_double_precision flag propagates."""
-        dev = qml.device("maestro.qubit", wires=1, use_double_precision=True)
-        cfg = dev._build_config()
-        assert cfg.use_double_precision is True
+    @pytest.mark.parametrize("precision", ["single", "double"])
+    def test_precision_config(self, precision):
+        """precision propagates to the config."""
+        dev = qml.device("maestro.qubit", wires=1, precision=precision)
+        assert dev._build_config().precision == precision
+
+    @pytest.mark.parametrize(
+        "use_double_precision, expected", [(True, "double"), (False, "single")]
+    )
+    def test_legacy_double_precision_config(self, use_double_precision, expected):
+        """Legacy use_double_precision maps onto precision."""
+        dev = qml.device(
+            "maestro.qubit", wires=1, use_double_precision=use_double_precision
+        )
+        assert dev._build_config().precision == expected
+
+    def test_precision_and_legacy_flag_agree(self):
+        """Consistent precision and use_double_precision are accepted."""
+        dev = qml.device(
+            "maestro.qubit", wires=1, precision="double", use_double_precision=True
+        )
+        assert dev._build_config().precision == "double"
+
+    def test_precision_conflict_raises(self):
+        """Conflicting precision and use_double_precision raise."""
+        with pytest.raises(ValueError, match="Conflicting"):
+            qml.device(
+                "maestro.qubit", wires=1, precision="single", use_double_precision=True
+            )
+
+    def test_invalid_precision_raises(self):
+        """Unknown precision strings raise."""
+        with pytest.raises(ValueError, match="Unknown precision"):
+            qml.device("maestro.qubit", wires=1, precision="half")
 
     def test_optional_fields_unset(self):
         """When max_bond_dimension / SVD threshold are None, config uses defaults."""
@@ -75,14 +107,111 @@ class TestBuildConfig:
             wires=2,
             simulation_type="PauliPropagator",
             pp_coefficient_threshold=1e-4,
-            pp_pauli_weight_threshold=5,
-            pp_steps_between_trims=10,
+            pp_max_pauli_weight=5,
+            pp_gates_between_trims=10,
+            pp_gates_between_deduplications=3,
         )
         cfg = dev._build_config()
         assert cfg.simulation_type == maestro.SimulationType.PauliPropagator
         assert cfg.pp_coefficient_threshold == pytest.approx(1e-4)
-        assert cfg.pp_pauli_weight_threshold == 5
-        assert cfg.pp_steps_between_trims == 10
+        assert cfg.pp_max_pauli_weight == 5
+        assert cfg.pp_gates_between_trims == 10
+        assert cfg.pp_gates_between_deduplications == 3
+
+    def test_pauli_propagator_defaults_unset(self):
+        """Unset Pauli propagator parameters keep SimulatorConfig defaults."""
+        cfg = qml.device("maestro.qubit", wires=1)._build_config()
+        default = SimulatorConfig()
+        assert cfg.pp_max_pauli_weight == default.pp_max_pauli_weight
+        assert cfg.pp_gates_between_trims == default.pp_gates_between_trims
+        assert (
+            cfg.pp_gates_between_deduplications
+            == default.pp_gates_between_deduplications
+        )
+
+    def test_pauli_propagator_legacy_names(self):
+        """Legacy Pauli propagator names map to the new fields with a warning."""
+        with pytest.warns(DeprecationWarning) as record:
+            dev = qml.device(
+                "maestro.qubit",
+                wires=2,
+                simulation_type="PauliPropagator",
+                pp_pauli_weight_threshold=5,
+                pp_steps_between_trims=10,
+            )
+        messages = [str(w.message) for w in record]
+        assert any("pp_pauli_weight_threshold" in m for m in messages)
+        assert any("pp_steps_between_trims" in m for m in messages)
+        cfg = dev._build_config()
+        assert cfg.pp_max_pauli_weight == 5
+        assert cfg.pp_gates_between_trims == 10
+
+    def test_pauli_propagator_legacy_conflict_raises(self):
+        """Conflicting new and legacy Pauli propagator values raise."""
+        with pytest.warns(DeprecationWarning), pytest.raises(
+            ValueError, match="Conflicting"
+        ):
+            qml.device(
+                "maestro.qubit",
+                wires=1,
+                pp_max_pauli_weight=4,
+                pp_pauli_weight_threshold=5,
+            )
+
+    def test_reduction_defaults(self):
+        """Pre-execution reductions are on and gate fusion is backend-default."""
+        cfg = qml.device("maestro.qubit", wires=1)._build_config()
+        assert cfg.enable_causal_cone_reduction is True
+        assert cfg.auto_reduce is True
+        assert cfg.gate_fusion is None
+
+    def test_reduction_flags_config(self):
+        """Pre-execution reduction flags propagate."""
+        dev = qml.device(
+            "maestro.qubit",
+            wires=1,
+            enable_causal_cone_reduction=False,
+            auto_reduce=False,
+        )
+        cfg = dev._build_config()
+        assert cfg.enable_causal_cone_reduction is False
+        assert cfg.auto_reduce is False
+
+    @pytest.mark.parametrize("gate_fusion", [True, False])
+    def test_gate_fusion_config(self, gate_fusion):
+        """gate_fusion propagates."""
+        dev = qml.device("maestro.qubit", wires=1, gate_fusion=gate_fusion)
+        assert dev._build_config().gate_fusion is gate_fusion
+
+    @pytest.mark.skipif(
+        not _SUPPORTS_OBSERVABLE_CLUSTERING,
+        reason="installed qoro-maestro lacks observable clustering",
+    )
+    def test_observable_clustering_config(self):
+        """Observable clustering settings propagate."""
+        cfg = qml.device("maestro.qubit", wires=1)._build_config()
+        assert cfg.enable_observable_clustering is True
+        assert cfg.max_cluster_qubits is None
+
+        dev = qml.device(
+            "maestro.qubit",
+            wires=1,
+            enable_observable_clustering=False,
+            max_cluster_qubits=8,
+        )
+        cfg = dev._build_config()
+        assert cfg.enable_observable_clustering is False
+        assert cfg.max_cluster_qubits == 8
+
+    @pytest.mark.skipif(
+        _SUPPORTS_OBSERVABLE_CLUSTERING,
+        reason="installed qoro-maestro supports observable clustering",
+    )
+    def test_observable_clustering_unsupported_warns(self):
+        """Non-default clustering settings warn when Maestro lacks support."""
+        with pytest.warns(UserWarning, match="observable clustering"):
+            dev = qml.device("maestro.qubit", wires=1, max_cluster_qubits=8)
+        assert not hasattr(dev._build_config(), "max_cluster_qubits")
 
     def test_seed_config(self):
         """Seed setting propagates to SimulatorConfig."""
@@ -248,3 +377,26 @@ class TestSimulatorConfigExecution:
         res = circuit()
         # Initial |00>, X on 0 gives |10>. Z@Z on |10> gives -1.
         assert np.isclose(res, -1.0, atol=1e-6)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"enable_causal_cone_reduction": False, "auto_reduce": False},
+            {"gate_fusion": True},
+            {"gate_fusion": False},
+        ],
+    )
+    def test_reduction_and_fusion_execution(self, kwargs):
+        """Results are unchanged with reductions or gate fusion toggled."""
+        dev = qml.device("maestro.qubit", wires=3, **kwargs)
+        ref = qml.device("default.qubit", wires=3)
+
+        def circuit():
+            qml.RX(0.3, 0)
+            qml.CNOT([0, 1])
+            qml.RY(0.7, 2)
+            return qml.expval(qml.PauliZ(0)), qml.expval(qml.PauliZ(1) @ qml.PauliX(2))
+
+        res = qml.QNode(circuit, dev)()
+        expected = qml.QNode(circuit, ref)()
+        assert np.allclose(res, expected, atol=1e-6)
