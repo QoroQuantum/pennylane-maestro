@@ -78,7 +78,7 @@ def test_matches_default_qubit(backend, measurements, batched, device_vjp):
     rng = np.random.default_rng(1)
     x = pnp.array(rng.uniform(0, 1, (3, 4) if batched else 4), requires_grad=False)
     ref_val, ref_jac, _ = run("default.qubit", measurements, x, "backprop")
-    val, jac, f = run(
+    val, jac, _ = run(
         "maestro.qubit", measurements, x, "best", device_vjp=device_vjp,
         device_kwargs={"adjoint_backend": backend},
     )

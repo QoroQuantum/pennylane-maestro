@@ -2,7 +2,6 @@
 
 import numpy as np
 import pennylane as qml
-import pytest
 
 
 class TestSnapshotBasic:

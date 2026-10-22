@@ -368,7 +368,10 @@ def inner_product_jacobian(template, angles, observables, config):
     """Jacobian ``(num_measurements, num_gate_params)`` for one angle row."""
     flat = _split_u(template.records, angles)
     n = template.num_wires
-    lhs = [[(c, _build(n, flat, tail=_pauli_dict(s))) for c, s in terms] for terms in observables]
+    lhs = [
+        [(c, _build(n, flat, tail=_pauli_dict(s))) for c, s in terms if _pauli_dict(s)]
+        for terms in observables
+    ]
     jac = np.zeros((len(observables), len(template.slot_index)))
     for i, (builder, wires, _, slot) in enumerate(flat):
         if slot is None:

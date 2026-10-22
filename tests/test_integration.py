@@ -1,4 +1,3 @@
-import pytest
 import pennylane as qml
 from pennylane import numpy as np
 
@@ -103,12 +102,12 @@ def test_mps_mode(tol, shots):
 
 def test_decomposition(tol):
     """Test that unsupported gates are decomposed correctly."""
-    dev_maestro = qml.device("maestro.qubit", wires=1)
-    dev_default = qml.device("default.qubit", wires=1)
+    dev_maestro = qml.device("maestro.qubit", wires=2)
+    dev_default = qml.device("default.qubit", wires=2)
 
     def circuit():
-        # qml.Rot is not in the maestro native gates map
-        qml.Rot(0.1, 0.2, 0.3, wires=0)
+        # qml.IsingXX is not in the maestro native gates map
+        qml.IsingXX(0.5, wires=[0, 1])
         return qml.expval(qml.PauliZ(0))
 
     qnode_maestro = qml.QNode(circuit, dev_maestro)

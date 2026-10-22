@@ -32,3 +32,5 @@ pennylane_maestro = ["config.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+

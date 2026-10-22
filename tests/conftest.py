@@ -1,5 +1,4 @@
 import pytest
-import pennylane as qml
 
 @pytest.fixture
 def tol():

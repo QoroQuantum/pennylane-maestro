@@ -1,6 +1,5 @@
-import pytest
-import pennylane as qml
 import numpy as np
+import pennylane as qml
 
 def test_expval(tol, shots):
     """Test expectation value of PauliZ."""

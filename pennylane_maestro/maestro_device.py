@@ -6,19 +6,19 @@ Implements the **new** ``pennylane.devices.Device`` interface (schema 3).
 import warnings
 from dataclasses import replace
 from os import path
-from typing import Union
 
 import numpy as np
 import pennylane as qml
 from pennylane.devices import Device, ExecutionConfig
-from pennylane.exceptions import DeviceError
 from pennylane.devices.modifiers import simulator_tracking, single_tape_support
-from pennylane.devices.preprocess import decompose as _decompose
+from pennylane.devices.preprocess import decompose as _decompose, validate_device_wires
+from pennylane.devices.qubit import measure as _qubit_measure
+from pennylane.exceptions import DeviceError
 from pennylane.measurements import ExpectationMP, MidMeasureMP, SampleMP
 from pennylane.ops import Snapshot
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
-from pennylane.transforms import defer_measurements
+from pennylane.transforms import broadcast_expand, defer_measurements
 try:
     from pennylane.transforms.core import CompilePipeline
 except ImportError:
@@ -34,7 +34,6 @@ from pennylane_maestro.converter import (
     ADJOINT_MAP,
     tape_to_maestro,
     tape_to_maestro_native,
-    MCMTracker,
     observable_to_pauli_string,
     decompose_hamiltonian_to_pauli_terms,
     _apply_operation,
@@ -139,9 +138,7 @@ def _measure_state(mp, state: np.ndarray, num_wires: int):
     Unlike ``mp.process_state``, this rotates into the eigenbasis of
     non-diagonal observables (``expval(X)`` next to ``qml.state()``).
     """
-    from pennylane.devices.qubit import measure
-
-    return measure(mp, np.reshape(state, (2,) * num_wires))
+    return _qubit_measure(mp, np.reshape(state, (2,) * num_wires))
 
 
 def _counts_to_samples(counts: dict, num_wires: int) -> np.ndarray:
@@ -383,8 +380,6 @@ def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
 def _broadcast_expand_unless_native(tape: QuantumScript, native):
     """Split a broadcast tape into one tape per batch element, unless the
     device evaluates the whole batch in one engine call."""
-    from pennylane.transforms import broadcast_expand
-
     if tape.batch_size is None or native(tape):
         return (tape,), lambda results: results[0]
     return broadcast_expand(tape)
@@ -688,8 +683,6 @@ class MaestroQubitDevice(Device):
             else None
         )
 
-        from pennylane.devices.preprocess import validate_device_wires
-
         program = CompilePipeline()
 
         # ── Wire validation ──────────────────────────────────────────────
@@ -738,14 +731,13 @@ class MaestroQubitDevice(Device):
         self,
         circuits: QuantumScriptOrBatch,
         execution_config: ExecutionConfig | None = None,
-    ) -> Union[Result, ResultBatch]:
+    ) -> Result | ResultBatch:
         results = []
         for tape in circuits:
             if tape.batch_size is not None:
                 if self._batches_natively(tape, trainable_ok=True):
                     results.append(self._execute_parametric(tape))
                     continue
-                from pennylane.transforms import broadcast_expand
                 tapes, fn = broadcast_expand(tape)
                 tape_results = [self._execute_single(t) for t in tapes]
                 results.append(fn(tape_results))
@@ -818,11 +810,24 @@ class MaestroQubitDevice(Device):
         else:
             values = np.empty((len(angles), len(observables)))
             jac = np.empty((len(angles), len(observables), len(template.slot_index)))
+            all_paulis = []
+            term_slices = []
+            for terms in observables:
+                start = len(all_paulis)
+                coeffs = [c for c, _ in terms]
+                all_paulis.extend(ps for _, ps in terms)
+                term_slices.append((start, len(terms), coeffs))
+
             for row, a in enumerate(angles):
                 qc = template.circuit(a)
-                for m, terms in enumerate(observables):
-                    ev = qc.estimate([ps for _, ps in terms], config)["expectation_values"]
-                    values[row, m] = sum(c * v for (c, _), v in zip(terms, ev))
+                if all_paulis:
+                    ev = qc.estimate(all_paulis, config)["expectation_values"]
+                    for m, (start, count, coeffs) in enumerate(term_slices):
+                        values[row, m] = sum(
+                            c * v for c, v in zip(coeffs, ev[start:start + count])
+                        )
+                else:
+                    values[row, :] = 0.0
                 jac[row] = _adjoint.inner_product_jacobian(template, a, observables, config)
         jac = (jac @ template.selector)[:, :, list(tape.trainable_params)]
         return values, jac, batch, widths
@@ -842,13 +847,13 @@ class MaestroQubitDevice(Device):
         row_vjp = (raw["vjp"] @ template.selector)[:, list(mapped.trainable_params)]
         return raw["expectation_values"], _adjoint.reduce_vjp(row_vjp, tape), batch, widths
 
-    def _check_adjoint(self, tape: QuantumScript):
+    def _check_adjoint(self, tape: QuantumScript, vjp: bool = False):
         if not (
             self._parametric_available()
             and _adjoint.is_supported(
                 tape,
                 trainable=tape.trainable_params,
-                max_probability_wires=self._max_probability_wires(),
+                max_probability_wires=self._max_probability_wires(vjp=vjp),
             )
         ):
             raise DeviceError(
@@ -929,7 +934,7 @@ class MaestroQubitDevice(Device):
     ):
         results, jacs = [], []
         for tape in circuits:
-            self._check_adjoint(tape)
+            self._check_adjoint(tape, vjp=False)
             values, jac, batch, widths = self._parametric_jacobian(tape)
             results.append(_adjoint.format_values(values, batch, widths))
             jacs.append(_adjoint.format_jacobian(jac, batch, widths))
@@ -958,7 +963,7 @@ class MaestroQubitDevice(Device):
     ):
         results, vjps = [], []
         for tape, dy in zip(circuits, cotangents):
-            self._check_adjoint(tape)
+            self._check_adjoint(tape, vjp=True)
             values, vjp, batch, widths = self._parametric_vjp(tape, dy)
             results.append(_adjoint.format_values(values, batch, widths))
             vjps.append(vjp)
@@ -1530,11 +1535,9 @@ class MaestroQubitDevice(Device):
                 _add_pauli(ps)
 
         measure_at_steps = sorted(
-            list(
-                set(
-                    pattern["steps"]
-                    + ([pattern["final_step"]] if pattern["terminal_terms"] else [])
-                )
+            set(
+                pattern["steps"]
+                + ([pattern["final_step"]] if pattern["terminal_terms"] else [])
             )
         )
 
@@ -1673,7 +1676,7 @@ class MaestroQubitDevice(Device):
         raw = maestro.incremental_evolve(
             init_circuit,
             step_circuit,
-            sorted(list(measure_at_steps)),
+            sorted(measure_at_steps),
             all_paulis,
             config,
         )
