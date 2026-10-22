@@ -167,8 +167,29 @@ dev = qp.device("maestro.qubit", wires=20, gate_fusion=True,
 | `max_cluster_qubits` | `None` | Cap each observable cluster at this many lightcone qubits. Requires a Maestro release newer than 0.3.7; ignored otherwise. |
 | `gate_fusion` | `None` | Fuse compatible gates. `None` uses each backend's default. |
 | `seed` | `None` | Seed for reproducible sampling and noise. |
+| `adjoint_backend` | `"auto"` | How adjoint derivatives are computed (see [Gradients](#gradients)): `"engine"`, `"inner_product"`, or `"auto"` (engine when available). |
 
 `use_double_precision=True/False` is still accepted as shorthand for `precision="double"/"single"`. The legacy names `pp_pauli_weight_threshold` (→ `pp_max_pauli_weight`) and `pp_steps_between_trims` (→ `pp_gates_between_trims`) still work but emit a `DeprecationWarning`.
+
+### Gradients
+
+On the CPU statevector (`simulator_type="QCSim"`, `simulation_type="Statevector"`, the defaults), analytic expectation values of Pauli strings, tensor products and Hamiltonians/Sums, and `qml.probs`, are differentiated with the adjoint method. `diff_method="best"` (the QNode default) resolves to `"adjoint"`:
+
+```python
+dev = qp.device("maestro.qubit", wires=8)
+
+@qp.qnode(dev)                       # diff_method="best" -> "adjoint"
+def circuit(weights, x):
+    qp.AngleEmbedding(x, wires=range(8))
+    qp.StronglyEntanglingLayers(weights, wires=range(8))
+    return qp.expval(qp.Z(0))
+```
+
+* With a qoro-maestro build that includes `AdjointProgram`, the adjoint sweep runs in the engine, restricted to each observable's causal cone. A broadcast batch of inputs (e.g. `x` of shape `(32, 8)`) is evaluated and differentiated in one engine call. This includes trainable broadcast parameters, as in data re-uploading (`qml.Rot(w * x + b, ...)`): `diff_method="best"` then uses a device VJP, which returns one gradient entry per batch element. With `device_vjp=False` set explicitly, with `jax.jit`, or with torch when only some trainable parameters are broadcast, such a batch is split into one circuit per element.
+* `qml.probs` needs the engine path. A Jacobian costs one backward sweep per outcome, so it is used for up to 10 wires with the default `device_vjp=False` and up to 24 wires with `device_vjp=True` (one sweep in total); wider probabilities use parameter-shift.
+* With older qoro-maestro releases, `adjoint_backend="inner_product"` is used: one `maestro.inner_product` per gate parameter and Pauli term (expectation values only).
+* Finite shots, mid-circuit measurements, other simulation types (MPS, stabilizer, ...) and other measurements (`var`, `state`, samples, `probs` beyond the wire limits above) use parameter-shift, as before. `diff_method="adjoint"` raises for these.
+* With PennyLane's default `device_vjp=False`, the Jacobian is computed together with the forward pass. This is the fastest choice for training, but plain forward calls with trainable (`requires_grad=True`) parameters also pay for the Jacobian. For inference-heavy use, pass `device_vjp=True` to the QNode: forward calls then only simulate, and the gradient is a separate VJP pass (on a 20-qubit, 32-sample VQC: forward 0.46 s instead of 1.73 s, loss+grad 2.55 s instead of 1.82 s).
 
 ## Examples
 
@@ -178,7 +199,7 @@ Hamiltonians are evaluated natively via Maestro's batched `estimate()` — all P
 
 ```python
 import pennylane as qp
-import numpy as np
+from pennylane import numpy as np  # trainable arrays for qp.grad
 
 n_qubits = 20
 H = qp.Hamiltonian(
@@ -189,7 +210,7 @@ H = qp.Hamiltonian(
 
 dev = qp.device("maestro.qubit", wires=n_qubits)
 
-@qp.qnode(dev, diff_method="parameter-shift")
+@qp.qnode(dev)  # adjoint gradients on the statevector
 def vqe_circuit(params):
     for i in range(n_qubits):
         qp.RY(params[i], wires=i)
@@ -252,10 +273,10 @@ See [`examples/ising_phase_transition.py`](examples/ising_phase_transition.py) f
 
 ### Supported Operations
 
-* **Automatic Gate Decomposition** — PennyLane decomposes any unsupported gate (e.g. `Rot`) into Maestro's native gate set automatically.
+* **Automatic Gate Decomposition** — PennyLane decomposes any unsupported gate (e.g. `IsingXX`) into Maestro's native gate set automatically. `Rot` and `U3` are native.
 * **Mid-Circuit Measurements (MCM)** — Supports mid-circuit measurements (`qp.measure`), resets, and conditional operations (`qp.cond`).
 * **Snapshots** — Native support for `qp.Snapshot` with batched Pauli expectation estimation.
-* **Parameter Broadcasting** — Direct batch evaluation across parameter dimensions.
+* **Parameter Broadcasting** — Broadcast analytic Pauli expectation values and probabilities run as one batched engine call (with an `AdjointProgram`-enabled qoro-maestro); other broadcast circuits are split per batch element (see [Gradients](#gradients) for trainable broadcast parameters).
 * **Delay** — Native support for `qp.Delay` timing operations.
 
 ---

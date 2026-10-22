@@ -29,6 +29,7 @@ CRY        = { properties = ["invertible", "differentiable"] }
 CRZ        = { properties = ["invertible", "differentiable"] }
 ControlledPhaseShift = { properties = ["invertible", "differentiable"] }
 U3           = { properties = ["invertible", "differentiable"] }
+Rot          = { properties = ["invertible", "differentiable"] }
 "Adjoint(S)"  = { }
 "Adjoint(T)"  = { }
 "Adjoint(SX)" = { }

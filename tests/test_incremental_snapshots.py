@@ -8,7 +8,6 @@ import pennylane_maestro
 from pennylane_maestro.maestro_device import (
     _detect_trotter_snapshot_pattern,
     _ops_equal,
-    _blocks_equal,
 )
 
 

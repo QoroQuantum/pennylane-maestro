@@ -1,9 +1,7 @@
-import pytest
-import pennylane as qml
 import numpy as np
-from pprint import pprint
+import pennylane as qml
 
-from pennylane_maestro.converter import tape_to_maestro, observable_to_pauli_string
+from pennylane_maestro.converter import observable_to_pauli_string, tape_to_maestro
 
 class TestConverter:
     """Tests for the QuantumTape to Maestro QuantumCircuit conversion."""
@@ -33,7 +31,8 @@ class TestConverter:
             qml.RY(0.2, wires=0),
             qml.RZ(0.3, wires=0),
             qml.PhaseShift(0.4, wires=0),
-            qml.U3(0.5, 0.6, 0.7, wires=0)
+            qml.U3(0.5, 0.6, 0.7, wires=0),
+            qml.Rot(0.8, 0.9, 1.0, wires=0),
         ]).map_to_standard_wires()
         
         qc = tape_to_maestro(tape, 1)
@@ -81,7 +80,9 @@ class TestConverter:
             qml.adjoint(qml.T(0)),
             qml.adjoint(qml.SX(0)),
             qml.adjoint(qml.RX(0.1, wires=0)),
-            qml.adjoint(qml.PhaseShift(np.pi/2, wires=0))
+            qml.adjoint(qml.PhaseShift(np.pi/2, wires=0)),
+            qml.adjoint(qml.Rot(0.1, 0.2, 0.3, wires=0)),
+            qml.adjoint(qml.U3(0.4, 0.5, 0.6, wires=0)),
         ]).map_to_standard_wires()
         
         qc = tape_to_maestro(tape, 1)
