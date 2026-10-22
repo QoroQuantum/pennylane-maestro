@@ -104,9 +104,9 @@ def test_best_resolves_to_adjoint_and_batches_natively():
 
     with qml.Tracker(dev) as tracker:
         grad = qml.grad(cost)(weights)
-    # the whole batch of 8 goes to the device in one call
+    # the batch of 8 stays one broadcast tape, sent to the device in one call
     assert sum(v for k, v in tracker.totals.items() if k.endswith("batches")) == 1
-    assert tracker.totals["derivatives"] == 8
+    assert tracker.totals["derivatives"] == 1
 
     ref = qml.QNode(f.func, qml.device("default.qubit", wires=4), diff_method="backprop")
     ref_grad = qml.grad(lambda w: pnp.sum(ref(w, x) ** 2))(weights)

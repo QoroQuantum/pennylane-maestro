@@ -218,9 +218,15 @@ def batched_trainable(tape):
     """Whether a trainable parameter carries the broadcast dimension."""
     if tape.batch_size is None:
         return False
-    params = tape.get_parameters(trainable_only=False)
-    trainable = qml.math.get_trainable_indices(params)
-    return any(qml.math.ndim(params[i]) > 0 for i in trainable)
+    trainable = set(qml.math.get_trainable_indices(tape.get_parameters(trainable_only=False)))
+    index = 0
+    for op in tape.operations:
+        if op.batch_size is not None:
+            for j, p in enumerate(op.data):
+                if index + j in trainable and qml.math.ndim(p) > op.ndim_params[j]:
+                    return True
+        index += len(op.data)
+    return False
 
 
 # ---------------------------------------------------------------------------
