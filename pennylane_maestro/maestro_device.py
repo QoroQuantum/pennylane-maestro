@@ -740,12 +740,26 @@ class MaestroQubitDevice(Device):
             and self._simulation_type == maestro.SimulationType.Statevector
         )
 
+    def _max_probability_wires(self, vjp: bool = True) -> int:
+        """Most ``qml.probs`` wires taken on the adjoint path."""
+        if self._adjoint_backend != "engine" or not _adjoint.HAS_ENGINE_PROBABILITIES:
+            return 0
+        if vjp:
+            return _adjoint.MAX_PROBABILITY_WIRES_VJP
+        return _adjoint.MAX_PROBABILITY_WIRES_JACOBIAN
+
     def _batches_natively(self, tape: QuantumScript) -> bool:
         """Whether a broadcast tape runs as one batch on the engine."""
         return (
             _adjoint.HAS_ENGINE_ADJOINT
             and self._parametric_available()
-            and _adjoint.is_supported(tape, trainable=())
+            and _adjoint.is_supported(
+                tape,
+                trainable=(),
+                max_probability_wires=_adjoint.MAX_PROBABILITY_WIRES_VJP
+                if _adjoint.HAS_ENGINE_PROBABILITIES
+                else 0,
+            )
             and not _adjoint.batched_trainable(tape)
         )
 
@@ -754,20 +768,21 @@ class MaestroQubitDevice(Device):
         num_wires = max(len(tape.wires), 1)
         template = self._templates.get(tape)
         angles, batch = template.angles(tape)
-        observables = _adjoint.observable_terms(tape, num_wires)
-        return tape, template, angles, batch, observables
+        readouts, widths = _adjoint.readouts(tape, num_wires)
+        return tape, template, angles, batch, readouts, widths
 
     def _execute_parametric(self, tape: QuantumScript) -> Result:
-        """Pauli expectation values of a (possibly broadcast) tape."""
-        _, template, angles, batch, observables = self._prepare_parametric(tape)
+        """Expectation values and probabilities of a (possibly broadcast) tape."""
+        _, template, angles, batch, readouts, widths = self._prepare_parametric(tape)
         raw = template.program.expectation_values(
-            observables, angles, self._build_config()
+            readouts, angles, self._build_config()
         )
-        return _adjoint.format_values(raw["expectation_values"], batch)
+        return _adjoint.format_values(raw["expectation_values"], batch, widths)
 
     def _parametric_jacobian(self, tape: QuantumScript):
-        """Values ``(rows, M)`` and Jacobian ``(rows, M, trainable)``."""
-        tape, template, angles, batch, observables = self._prepare_parametric(tape)
+        """Values ``(rows, V)``, Jacobian ``(rows, V, trainable)``, batch size
+        and the number of values per measurement."""
+        tape, template, angles, batch, observables, widths = self._prepare_parametric(tape)
         config = self._build_config()
         if self._adjoint_backend == "engine":
             raw = template.program.jacobian(observables, angles, config)
@@ -782,24 +797,29 @@ class MaestroQubitDevice(Device):
                     values[row, m] = sum(c * v for (c, _), v in zip(terms, ev))
                 jac[row] = _adjoint.inner_product_jacobian(template, a, observables, config)
         jac = (jac @ template.selector)[:, :, list(tape.trainable_params)]
-        return values, jac, batch
+        return values, jac, batch, widths
 
     def _parametric_vjp(self, tape: QuantumScript, dy):
-        """Values ``(rows, M)`` and the VJP over trainable parameters."""
+        """Values ``(rows, V)``, the VJP over trainable parameters, batch size
+        and the number of values per measurement."""
         if self._adjoint_backend != "engine":
-            values, jac, batch = self._parametric_jacobian(tape)
-            cot = _adjoint.cotangent_matrix(dy, values.shape[1], batch)
-            return values, np.einsum("rm,rmk->k", cot, jac), batch
-        tape, template, angles, batch, observables = self._prepare_parametric(tape)
-        cot = _adjoint.cotangent_matrix(dy, len(observables), batch)
-        raw = template.program.vjp(observables, cot, angles, self._build_config())
+            values, jac, batch, widths = self._parametric_jacobian(tape)
+            cot = _adjoint.cotangent_matrix(dy, widths, batch)
+            return values, np.einsum("rm,rmk->k", cot, jac), batch, widths
+        tape, template, angles, batch, readouts, widths = self._prepare_parametric(tape)
+        cot = _adjoint.cotangent_matrix(dy, widths, batch)
+        raw = template.program.vjp(readouts, cot, angles, self._build_config())
         vjp = raw["vjp"].sum(axis=0) @ template.selector
-        return raw["expectation_values"], vjp[list(tape.trainable_params)], batch
+        return raw["expectation_values"], vjp[list(tape.trainable_params)], batch, widths
 
     def _check_adjoint(self, tape: QuantumScript):
         if not (
             self._parametric_available()
-            and _adjoint.is_supported(tape, trainable=tape.trainable_params)
+            and _adjoint.is_supported(
+                tape,
+                trainable=tape.trainable_params,
+                max_probability_wires=self._max_probability_wires(),
+            )
         ):
             raise DeviceError(
                 f"{self.name} cannot compute adjoint derivatives of this circuit."
@@ -814,15 +834,22 @@ class MaestroQubitDevice(Device):
         execution_config: ExecutionConfig | None = None,
         circuit: QuantumScript | None = None,
     ) -> bool:
-        """Adjoint derivatives of analytic Pauli expectation values on the CPU
-        statevector. Other cases fall back to PennyLane's gradient transforms."""
+        """Adjoint derivatives of analytic Pauli/Hamiltonian expectation values
+        on the CPU statevector, and of ``qml.probs`` with the engine backend
+        (up to 10 wires with a device Jacobian, 24 with a device VJP). Other
+        cases fall back to PennyLane's gradient transforms."""
         if execution_config is None:
             return self._parametric_available()
         if execution_config.gradient_method not in ("adjoint", "best"):
             return False
         if not self._parametric_available():
             return False
-        return circuit is None or _adjoint.is_supported(circuit)
+        if circuit is None:
+            return True
+        vjp = bool(execution_config.use_device_jacobian_product)
+        return _adjoint.is_supported(
+            circuit, max_probability_wires=self._max_probability_wires(vjp)
+        )
 
     def setup_execution_config(
         self,
@@ -864,9 +891,9 @@ class MaestroQubitDevice(Device):
         results, jacs = [], []
         for tape in circuits:
             self._check_adjoint(tape)
-            values, jac, batch = self._parametric_jacobian(tape)
-            results.append(_adjoint.format_values(values, batch))
-            jacs.append(_adjoint.format_jacobian(jac, batch))
+            values, jac, batch, widths = self._parametric_jacobian(tape)
+            results.append(_adjoint.format_values(values, batch, widths))
+            jacs.append(_adjoint.format_jacobian(jac, batch, widths))
         return tuple(results), tuple(jacs)
 
     def supports_vjp(
@@ -893,8 +920,8 @@ class MaestroQubitDevice(Device):
         results, vjps = [], []
         for tape, dy in zip(circuits, cotangents):
             self._check_adjoint(tape)
-            values, vjp, batch = self._parametric_vjp(tape, dy)
-            results.append(_adjoint.format_values(values, batch))
+            values, vjp, batch, widths = self._parametric_vjp(tape, dy)
+            results.append(_adjoint.format_values(values, batch, widths))
             vjps.append(tuple(np.float64(v) for v in vjp))
         return tuple(results), tuple(vjps)
 

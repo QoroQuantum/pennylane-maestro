@@ -20,6 +20,10 @@ releases may contain breaking changes).
 - Broadcast tapes with analytic Pauli expectation values run as one batched
   engine call instead of one tape per batch element (needs
   `maestro.AdjointProgram`).
+- Adjoint differentiation of `qml.probs` with the engine backend: up to 10
+  wires with a device Jacobian (`device_vjp=False`, the default), up to 24
+  with `device_vjp=True`. Broadcast tapes returning probabilities also run as
+  one batched engine call.
 - `Rot` is a native gate.
 
 ### Fixed

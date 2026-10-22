@@ -18,7 +18,7 @@ from collections import OrderedDict
 
 import numpy as np
 import pennylane as qml
-from pennylane.measurements import ExpectationMP, MidMeasureMP
+from pennylane.measurements import ExpectationMP, MidMeasureMP, ProbabilityMP
 from pennylane.ops import Snapshot
 from pennylane.ops.op_math import Adjoint, Conditional
 
@@ -28,6 +28,13 @@ from maestro.circuits import QuantumCircuit
 from pennylane_maestro.converter import ADJOINT_MAP, GATE_MAP, extract_pauli_terms
 
 HAS_ENGINE_ADJOINT = hasattr(maestro, "AdjointProgram")
+# Engine builds with probability readouts for AdjointProgram.
+HAS_ENGINE_PROBABILITIES = HAS_ENGINE_ADJOINT and hasattr(maestro, "Probabilities")
+
+# Most qml.probs wires taken on the adjoint path: a Jacobian costs one
+# backward sweep per outcome (2**k), a VJP one sweep in total.
+MAX_PROBABILITY_WIRES_JACOBIAN = 10
+MAX_PROBABILITY_WIRES_VJP = 24
 
 # One-angle gates: PennyLane name -> Maestro builder.
 _ONE_ANGLE = {
@@ -174,25 +181,38 @@ class TemplateCache:
         return template
 
 
-def observable_terms(tape, num_wires):
-    """``[(coeff, pauli_string), ...]`` per measurement, or raise."""
-    out = []
+def readouts(tape, num_wires):
+    """Engine readouts for the measurements, and how many values each gives.
+
+    Expectation values become ``[(coeff, pauli_string), ...]``; ``qml.probs``
+    becomes ``maestro.Probabilities`` with the wires reversed, so that the
+    engine's outcome index (first qubit least significant) equals
+    PennyLane's (first wire most significant).
+    """
+    out, widths = [], []
     for mp in tape.measurements:
+        if isinstance(mp, ProbabilityMP) and mp.obs is None and mp.mv is None:
+            wires = [int(w) for w in (mp.wires or tape.wires)]
+            out.append(maestro.Probabilities(wires[::-1]))
+            widths.append(2 ** len(wires))
+            continue
         if not isinstance(mp, ExpectationMP) or mp.obs is None:
-            raise UnsupportedTape("Only expectation values are supported.")
+            raise UnsupportedTape("Only expectation values and probabilities are supported.")
         terms = extract_pauli_terms(mp.obs, num_wires)
         if terms is None:
             raise UnsupportedTape(f"Observable {mp.obs} is not a sum of Pauli strings.")
         out.append(terms)
-    return out
+        widths.append(1)
+    return out, widths
 
 
-def is_supported(tape, trainable=None):
+def is_supported(tape, trainable=None, max_probability_wires=0):
     """Whether ``tape`` fits the parametric path (structure only, any wires).
 
     ``trainable`` lists the trainable parameter indices; by default they are
     read from the parameter types (autograd, torch, ...). Trainable
-    observable parameters are not supported.
+    observable parameters are not supported. ``qml.probs`` is supported on
+    up to ``max_probability_wires`` wires.
     """
     if tape.shots:
         return False
@@ -200,6 +220,10 @@ def is_supported(tape, trainable=None):
         if isinstance(op, (MidMeasureMP, Conditional, Snapshot)):
             return False
     for mp in tape.measurements:
+        if isinstance(mp, ProbabilityMP) and mp.obs is None and mp.mv is None:
+            if len(mp.wires or tape.wires) > max_probability_wires:
+                return False
+            continue
         if not isinstance(mp, ExpectationMP) or mp.obs is None:
             return False
         try:
@@ -234,31 +258,47 @@ def batched_trainable(tape):
 # ---------------------------------------------------------------------------
 
 
-def format_values(values, batch):
-    """``values`` has shape ``(rows, num_measurements)``."""
-    cols = [values[:, m] if batch else np.float64(values[0, m]) for m in range(values.shape[1])]
+def _slices(widths):
+    starts = np.cumsum([0] + list(widths))
+    return [slice(a, b) for a, b in zip(starts[:-1], starts[1:])]
+
+
+def _leaf(block, batch, width):
+    """``block`` has shape ``(rows, width)``: one measurement's values."""
+    if width == 1:
+        return block[:, 0] if batch else np.asarray(block[0, 0])
+    return block if batch else block[0]
+
+
+def format_values(values, batch, widths):
+    """``values`` has shape ``(rows, num_values)``."""
+    cols = []
+    for sl, w in zip(_slices(widths), widths):
+        leaf = _leaf(values[:, sl], batch, w)
+        cols.append(np.float64(leaf) if (w == 1 and not batch) else leaf)
     return cols[0] if len(cols) == 1 else tuple(cols)
 
 
-def format_jacobian(jac, batch):
-    """``jac`` has shape ``(rows, num_measurements, num_trainable)``."""
-    _, num_meas, num_params = jac.shape
-
-    def leaf(m, k):
-        return jac[:, m, k] if batch else np.array(jac[0, m, k])
-
+def format_jacobian(jac, batch, widths):
+    """``jac`` has shape ``(rows, num_values, num_trainable)``."""
+    num_params = jac.shape[2]
+    num_meas = len(widths)
     if num_params == 0:
         return np.zeros((1, 0)) if num_meas == 1 else tuple(np.zeros((1, 0)) for _ in range(num_meas))
-    per_meas = [leaf(m, 0) if num_params == 1 else tuple(leaf(m, k) for k in range(num_params))
-                for m in range(num_meas)]
+    per_meas = []
+    for sl, w in zip(_slices(widths), widths):
+        leaves = [_leaf(jac[:, sl, k], batch, w) for k in range(num_params)]
+        per_meas.append(leaves[0] if num_params == 1 else tuple(leaves))
     return per_meas[0] if num_meas == 1 else tuple(per_meas)
 
 
-def cotangent_matrix(dy, num_meas, batch):
-    """Cotangents as ``(rows, num_measurements)``."""
-    cols = [dy] if num_meas == 1 else list(dy)
+def cotangent_matrix(dy, widths, batch):
+    """Cotangents as ``(rows, num_values)``."""
+    per_meas = [dy] if len(widths) == 1 else list(dy)
     rows = batch or 1
-    return np.stack([np.broadcast_to(np.asarray(c, dtype=np.float64), (rows,)) for c in cols], axis=1)
+    return np.concatenate(
+        [np.asarray(c, dtype=np.float64).reshape(rows, w) for c, w in zip(per_meas, widths)], axis=1
+    )
 
 
 # ---------------------------------------------------------------------------

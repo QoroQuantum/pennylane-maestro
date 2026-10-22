@@ -155,9 +155,9 @@ def test_unsupported_measurements_fall_back():
     dev = qml.device("maestro.qubit", wires=2)
 
     @qml.qnode(dev)
-    def probs(x):
+    def var(x):
         qml.RX(x, wires=0)
-        return qml.probs(wires=[0])
+        return qml.var(qml.Y(0))
 
     @qml.qnode(dev)
     def mcm(x):
@@ -167,8 +167,9 @@ def test_unsupported_measurements_fall_back():
         return qml.expval(qml.Z(1))
 
     x = pnp.array(0.3, requires_grad=True)
-    assert qml.workflow.get_best_diff_method(probs)(x) == "parameter-shift"
-    assert qml.math.allclose(qml.jacobian(probs)(x), [-np.sin(0.3) / 2, np.sin(0.3) / 2])
+    assert qml.workflow.get_best_diff_method(var)(x) == "parameter-shift"
+    # var(Y) = 1 - sin(x)^2 after RX(x)
+    assert np.isclose(qml.grad(var)(x), -np.sin(2 * 0.3), atol=1e-8)
     assert qml.workflow.get_best_diff_method(mcm)(x) == "parameter-shift"
 
 
@@ -205,3 +206,53 @@ def test_non_diagonal_expval_next_to_state():
 def test_invalid_adjoint_backend():
     with pytest.raises(ValueError, match="adjoint_backend"):
         qml.device("maestro.qubit", wires=1, adjoint_backend="nope")
+
+
+needs_engine_probs = pytest.mark.skipif(
+    not _adjoint.HAS_ENGINE_PROBABILITIES, reason="qoro-maestro build without Probabilities readouts"
+)
+
+
+@needs_engine_probs
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize("device_vjp", [False, True])
+@pytest.mark.parametrize("readout", ["probs", "probs_subset", "mixed"])
+def test_probabilities_match_default_qubit(batched, device_vjp, readout):
+    rng = np.random.default_rng(2)
+    x = pnp.array(rng.uniform(0, 1, (3, 4) if batched else 4), requires_grad=False)
+
+    def f(weights):
+        circuit(weights, x, measurements=())
+        if readout == "probs":
+            return qml.probs()
+        if readout == "probs_subset":
+            return qml.probs(wires=[WIRES[2], WIRES[0]])
+        return qml.probs(wires=[WIRES[1]]), qml.expval(OBSERVABLES[2](WIRES))
+
+    def flat(qnode):
+        def g(w):
+            res = qnode(w)
+            return qml.math.concatenate([qml.math.reshape(r, (-1,)) for r in res]) if isinstance(res, tuple) else res
+        return g
+
+    weights = pnp.array(np.random.default_rng(3).uniform(-np.pi, np.pi, NUM_WEIGHTS), requires_grad=True)
+    ref = qml.QNode(f, qml.device("default.qubit", wires=WIRES), diff_method="backprop")
+    dev = qml.QNode(f, qml.device("maestro.qubit", wires=WIRES), device_vjp=device_vjp)
+    assert qml.workflow.get_best_diff_method(dev)(weights) == "adjoint"
+    for a, b in zip(dev(weights), ref(weights)) if readout == "mixed" else [(dev(weights), ref(weights))]:
+        assert qml.math.allclose(a, b, atol=1e-10)
+    assert qml.math.allclose(qml.jacobian(flat(dev))(weights), qml.jacobian(flat(ref))(weights), atol=1e-8)
+
+
+@needs_engine_probs
+def test_wide_probabilities_need_device_vjp():
+    def f(w):
+        for q in range(11):
+            qml.RY(w[q], wires=q)
+        return qml.probs()
+
+    w = pnp.array(np.linspace(0.1, 1.1, 11), requires_grad=True)
+    jac_mode = qml.QNode(f, qml.device("maestro.qubit", wires=11))
+    vjp_mode = qml.QNode(f, qml.device("maestro.qubit", wires=11), device_vjp=True)
+    assert qml.workflow.get_best_diff_method(jac_mode)(w) == "parameter-shift"
+    assert qml.workflow.get_best_diff_method(vjp_mode)(w) == "adjoint"
