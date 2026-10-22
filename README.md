@@ -185,7 +185,7 @@ def circuit(weights, x):
     return qp.expval(qp.Z(0))
 ```
 
-* With a qoro-maestro build that includes `AdjointProgram`, the adjoint sweep runs in the engine, restricted to each observable's causal cone. A broadcast batch of inputs (e.g. `x` of shape `(32, 8)`) is evaluated and differentiated in one engine call.
+* With a qoro-maestro build that includes `AdjointProgram`, the adjoint sweep runs in the engine, restricted to each observable's causal cone. A broadcast batch of inputs (e.g. `x` of shape `(32, 8)`) is evaluated and differentiated in one engine call. This includes trainable broadcast parameters, as in data re-uploading (`qml.Rot(w * x + b, ...)`): `diff_method="best"` then uses a device VJP, which returns one gradient entry per batch element. With `device_vjp=False` set explicitly, with `jax.jit`, or with torch when only some trainable parameters are broadcast, such a batch is split into one circuit per element.
 * `qml.probs` needs the engine path. A Jacobian costs one backward sweep per outcome, so it is used for up to 10 wires with the default `device_vjp=False` and up to 24 wires with `device_vjp=True` (one sweep in total); wider probabilities use parameter-shift.
 * With older qoro-maestro releases, `adjoint_backend="inner_product"` is used: one `maestro.inner_product` per gate parameter and Pauli term (expectation values only).
 * Finite shots, mid-circuit measurements, other simulation types (MPS, stabilizer, ...) and other measurements (`var`, `state`, samples, `probs` beyond the wire limits above) use parameter-shift, as before. `diff_method="adjoint"` raises for these.
@@ -276,7 +276,7 @@ See [`examples/ising_phase_transition.py`](examples/ising_phase_transition.py) f
 * **Automatic Gate Decomposition** — PennyLane decomposes any unsupported gate (e.g. `IsingXX`) into Maestro's native gate set automatically. `Rot` and `U3` are native.
 * **Mid-Circuit Measurements (MCM)** — Supports mid-circuit measurements (`qp.measure`), resets, and conditional operations (`qp.cond`).
 * **Snapshots** — Native support for `qp.Snapshot` with batched Pauli expectation estimation.
-* **Parameter Broadcasting** — Broadcast analytic Pauli expectation values run as one batched engine call (with an `AdjointProgram`-enabled qoro-maestro); other broadcast circuits are split per batch element.
+* **Parameter Broadcasting** — Broadcast analytic Pauli expectation values and probabilities run as one batched engine call (with an `AdjointProgram`-enabled qoro-maestro); other broadcast circuits are split per batch element (see [Gradients](#gradients) for trainable broadcast parameters).
 * **Delay** — Native support for `qp.Delay` timing operations.
 
 ---

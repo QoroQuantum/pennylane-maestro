@@ -1,5 +1,7 @@
 """Analytic derivatives and native batching on the statevector path."""
 
+from functools import partial
+
 import numpy as np
 import pennylane as qml
 import pennylane.numpy as pnp
@@ -113,23 +115,97 @@ def test_best_resolves_to_adjoint_and_batches_natively():
     assert qml.math.allclose(grad, ref_grad, atol=1e-8)
 
 
+def reuploading(x, w, t, probs=True, mixed=True):
+    """Data re-uploading: trainable gate angles that carry the batch."""
+    for layer in range(2):
+        for q in range(3):
+            v = w[layer, q] * x + t[layer, q]
+            qml.Rot(v[..., 0], v[..., 1], v[..., 2], wires=q)
+        qml.CZ(wires=[0, 1])
+        qml.CZ(wires=[1, 2])
+    if mixed:
+        qml.RY(t[0, 0, 0], wires=2)  # trainable, not broadcast
+    if not probs:
+        return qml.expval(qml.Z(0) @ qml.X(1)), qml.expval(qml.Y(2))
+    return qml.expval(qml.Z(0) @ qml.X(1)), qml.probs(wires=[1, 2])
+
+
+def reuploading_inputs():
+    rng = np.random.default_rng(4)
+    return rng.uniform(size=(5, 3)), rng.uniform(size=(2, 3, 3)), rng.uniform(size=(2, 3, 3))
+
+
+def reuploading_cost(res, math):
+    if res[1].ndim == 1:
+        return math.sum(res[0] ** 2) + math.sum(res[0] * res[1])
+    return math.sum(res[0] ** 2) + math.sum(res[1][:, 0] * res[1][:, 3])
+
+
 @needs_engine
-def test_trainable_broadcast_parameters_are_expanded():
-    dev = qml.device("maestro.qubit", wires=2)
-    ref_dev = qml.device("default.qubit", wires=2)
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize(
+    "kwargs, derivative_tapes",
+    [
+        ({}, 0),  # best -> device VJP: the batch stays one tape
+        ({"diff_method": "adjoint", "device_vjp": True}, 0),
+        ({"diff_method": "adjoint", "device_vjp": False}, 5),  # Jacobian: one tape per row
+    ],
+)
+def test_trainable_broadcast_parameters(backend, kwargs, derivative_tapes):
+    x, w, t = reuploading_inputs()
+    # inner_product has no qml.probs; its fallback, parameter-shift, cannot
+    # differentiate broadcast parameters
+    func = partial(reuploading, probs=backend == "engine")
+    dev = qml.device("maestro.qubit", wires=3, adjoint_backend=backend)
+    f = qml.QNode(func, dev, **kwargs)
+    ref = qml.QNode(func, qml.device("default.qubit", wires=3), diff_method="backprop")
 
-    def f(x, y):
-        qml.RX(x, wires=0)
-        qml.CNOT(wires=[0, 1])
-        qml.RY(y, wires=1)
-        return qml.expval(qml.Z(1))
+    def grad(qnode):
+        cost = lambda w, t: reuploading_cost(qnode(pnp.array(x, requires_grad=False), w, t), pnp)
+        return qml.grad(cost)(pnp.array(w, requires_grad=True), pnp.array(t, requires_grad=True))
 
-    x = pnp.array([0.1, 0.4, 0.9], requires_grad=True)
-    y = pnp.array(0.3, requires_grad=True)
-    jac = qml.jacobian(qml.QNode(f, dev))(x, y)
-    ref = qml.jacobian(qml.QNode(f, ref_dev, diff_method="backprop"))(x, y)
-    for a, b in zip(jac, ref):
+    with qml.Tracker(dev) as tracker:
+        got = grad(f)
+    for a, b in zip(got, grad(ref)):
         assert qml.math.allclose(a, b, atol=1e-8)
+    assert tracker.totals.get("derivatives", 0) == derivative_tapes
+    assert tracker.totals.get("vjp_batches", 0) == (0 if derivative_tapes else 1)
+
+
+@needs_engine
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("interface", ["torch", "jax", "jax-jit"])
+def test_trainable_broadcast_parameters_other_interfaces(interface, mixed):
+    """torch keeps the batch only when every trainable parameter is
+    broadcast, jax-jit never; both split it otherwise, with the same
+    gradients."""
+    x, w, t = reuploading_inputs()
+    func = partial(reuploading, mixed=mixed)
+    ref = qml.QNode(func, qml.device("default.qubit", wires=3), diff_method="backprop")
+    ref_grad = qml.grad(
+        lambda w, t: reuploading_cost(ref(pnp.array(x, requires_grad=False), w, t), pnp)
+    )(pnp.array(w, requires_grad=True), pnp.array(t, requires_grad=True))
+    dev = qml.device("maestro.qubit", wires=3)
+    f = qml.QNode(func, dev)
+
+    if interface == "torch":
+        torch = pytest.importorskip("torch")
+        wt, tt = torch.tensor(w, requires_grad=True), torch.tensor(t, requires_grad=True)
+        with qml.Tracker(dev) as tracker:
+            reuploading_cost(f(torch.tensor(x), wt, tt), torch).backward()
+        got = (wt.grad.numpy(), tt.grad.numpy())
+    else:
+        jax = pytest.importorskip("jax")
+        jax.config.update("jax_enable_x64", True)
+        cost = lambda w, t: reuploading_cost(f(jax.numpy.array(x), w, t), jax.numpy)
+        if interface == "jax-jit":
+            cost = jax.jit(cost)
+        with qml.Tracker(dev) as tracker:
+            got = jax.grad(cost, argnums=(0, 1))(jax.numpy.array(w), jax.numpy.array(t))
+    for a, b in zip(got, ref_grad):
+        assert qml.math.allclose(np.asarray(a), b, atol=1e-8)
+    native = interface == "jax" or (interface == "torch" and not mixed)
+    assert tracker.totals.get("derivatives", 0) == (0 if native else 5)
 
 
 def test_finite_shots_and_other_backends_use_parameter_shift():

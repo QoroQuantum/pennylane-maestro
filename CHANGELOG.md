@@ -24,6 +24,12 @@ releases may contain breaking changes).
   wires with a device Jacobian (`device_vjp=False`, the default), up to 24
   with `device_vjp=True`. Broadcast tapes returning probabilities also run as
   one batched engine call.
+- Trainable broadcast parameters (e.g. data re-uploading, `qml.Rot(w * x + b)`)
+  stay in one batched engine call when differentiated with a device VJP,
+  which returns one gradient entry per batch element. `diff_method="best"`
+  selects the device VJP for such circuits; explicit `device_vjp=False`,
+  `jax.jit`, and torch with a mix of broadcast and plain trainable
+  parameters still split the batch per element.
 - `Rot` is a native gate.
 
 ### Fixed

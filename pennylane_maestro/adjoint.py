@@ -238,19 +238,41 @@ def is_supported(tape, trainable=None, max_probability_wires=0):
     return all(i < num_op_params for i in trainable)
 
 
-def batched_trainable(tape):
-    """Whether a trainable parameter carries the broadcast dimension."""
+def batched_params(tape):
+    """Indices of the tape parameters that carry the broadcast dimension."""
     if tape.batch_size is None:
-        return False
-    trainable = set(qml.math.get_trainable_indices(tape.get_parameters(trainable_only=False)))
+        return set()
+    out = set()
     index = 0
     for op in tape.operations:
         if op.batch_size is not None:
             for j, p in enumerate(op.data):
-                if index + j in trainable and qml.math.ndim(p) > op.ndim_params[j]:
-                    return True
+                if qml.math.ndim(p) > op.ndim_params[j]:
+                    out.add(index + j)
         index += len(op.data)
-    return False
+    return out
+
+
+def batched_trainable(tape):
+    """Whether a trainable parameter carries the broadcast dimension."""
+    batched = batched_params(tape)
+    if not batched:
+        return False
+    trainable = qml.math.get_trainable_indices(tape.get_parameters(trainable_only=False))
+    return not batched.isdisjoint(trainable)
+
+
+def reduce_vjp(row_vjp, tape):
+    """VJP per trainable parameter from the VJP of each batch row.
+
+    ``row_vjp`` has shape ``(rows, num_trainable)``. A parameter that carries
+    the broadcast dimension gets one entry per row; the others are summed.
+    """
+    batched = batched_params(tape)
+    return tuple(
+        row_vjp[:, k].copy() if p in batched else np.float64(row_vjp[:, k].sum())
+        for k, p in enumerate(tape.trainable_params)
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -390,6 +390,22 @@ def _broadcast_expand_unless_native(tape: QuantumScript, native):
     return broadcast_expand(tape)
 
 
+def _row_vjps_supported(config: ExecutionConfig, tape: QuantumScript) -> bool:
+    """Whether the interface accepts a VJP with one entry per batch row for
+    the broadcast parameters of ``tape``.
+
+    jax-jit rebuilds JVPs from it and cannot; torch stacks a tape's VJPs
+    into one array, so every trainable parameter must be broadcast.
+    """
+    interface = getattr(config.interface, "value", config.interface)
+    if interface == "jax-jit":
+        return False
+    if interface == "torch":
+        trainable = qml.math.get_trainable_indices(tape.get_parameters(trainable_only=False))
+        return set(trainable) <= _adjoint.batched_params(tape)
+    return True
+
+
 _ADJOINT_BACKENDS = ("auto", "engine", "inner_product")
 
 
@@ -680,11 +696,19 @@ class MaestroQubitDevice(Device):
         program.add_transform(validate_device_wires, self.wires, name=self.name)
 
         # ── Parameter broadcasting / batching ───────────────────────────
-        # Analytic Pauli expectation values keep the batch in one tape and
-        # run it in one engine call; everything else is split per element.
-        program.add_transform(
-            _broadcast_expand_unless_native, native=self._batches_natively
+        # Analytic expectation values and probabilities keep the batch in
+        # one tape and run it in one engine call; everything else is split
+        # per element. Trainable broadcast parameters stay batched only
+        # with a device VJP, which returns one gradient entry per row.
+        device_vjp = config.gradient_method == "adjoint" and bool(
+            config.use_device_jacobian_product
         )
+
+        def native(tape):
+            trainable_ok = device_vjp and _row_vjps_supported(config, tape)
+            return self._batches_natively(tape, trainable_ok=trainable_ok)
+
+        program.add_transform(_broadcast_expand_unless_native, native=native)
 
         # ── MCM handling ────────────────────────────────────────────────
         # Only apply defer_measurements when explicitly requested.
@@ -718,7 +742,7 @@ class MaestroQubitDevice(Device):
         results = []
         for tape in circuits:
             if tape.batch_size is not None:
-                if self._batches_natively(tape):
+                if self._batches_natively(tape, trainable_ok=True):
                     results.append(self._execute_parametric(tape))
                     continue
                 from pennylane.transforms import broadcast_expand
@@ -748,8 +772,12 @@ class MaestroQubitDevice(Device):
             return _adjoint.MAX_PROBABILITY_WIRES_VJP
         return _adjoint.MAX_PROBABILITY_WIRES_JACOBIAN
 
-    def _batches_natively(self, tape: QuantumScript) -> bool:
-        """Whether a broadcast tape runs as one batch on the engine."""
+    def _batches_natively(self, tape: QuantumScript, trainable_ok: bool = False) -> bool:
+        """Whether a broadcast tape runs as one batch on the engine.
+
+        Unless ``trainable_ok``, a tape whose trainable parameters carry the
+        broadcast dimension is split: a device Jacobian has no entry per
+        batch element for them."""
         return (
             _adjoint.HAS_ENGINE_ADJOINT
             and self._parametric_available()
@@ -760,7 +788,7 @@ class MaestroQubitDevice(Device):
                 if _adjoint.HAS_ENGINE_PROBABILITIES
                 else 0,
             )
-            and not _adjoint.batched_trainable(tape)
+            and (trainable_ok or not _adjoint.batched_trainable(tape))
         )
 
     def _prepare_parametric(self, tape: QuantumScript):
@@ -800,17 +828,19 @@ class MaestroQubitDevice(Device):
         return values, jac, batch, widths
 
     def _parametric_vjp(self, tape: QuantumScript, dy):
-        """Values ``(rows, V)``, the VJP over trainable parameters, batch size
-        and the number of values per measurement."""
+        """Values ``(rows, V)``, the VJP per trainable parameter (one entry
+        per row for broadcast parameters), batch size and the number of
+        values per measurement."""
         if self._adjoint_backend != "engine":
             values, jac, batch, widths = self._parametric_jacobian(tape)
             cot = _adjoint.cotangent_matrix(dy, widths, batch)
-            return values, np.einsum("rm,rmk->k", cot, jac), batch, widths
-        tape, template, angles, batch, readouts, widths = self._prepare_parametric(tape)
+            row_vjp = np.einsum("rm,rmk->rk", cot, jac)
+            return values, _adjoint.reduce_vjp(row_vjp, tape), batch, widths
+        mapped, template, angles, batch, readouts, widths = self._prepare_parametric(tape)
         cot = _adjoint.cotangent_matrix(dy, widths, batch)
         raw = template.program.vjp(readouts, cot, angles, self._build_config())
-        vjp = raw["vjp"].sum(axis=0) @ template.selector
-        return raw["expectation_values"], vjp[list(tape.trainable_params)], batch, widths
+        row_vjp = (raw["vjp"] @ template.selector)[:, list(mapped.trainable_params)]
+        return raw["expectation_values"], _adjoint.reduce_vjp(row_vjp, tape), batch, widths
 
     def _check_adjoint(self, tape: QuantumScript):
         if not (
@@ -858,10 +888,19 @@ class MaestroQubitDevice(Device):
     ) -> ExecutionConfig:
         config = config or ExecutionConfig()
         if config.gradient_method in ("best", "adjoint"):
-            if self.supports_derivatives(config, circuit):
-                vjp = config.use_device_jacobian_product
-                if vjp is None:
-                    vjp = True
+            vjp = config.use_device_jacobian_product
+            if vjp is None or (
+                config.gradient_method == "best"
+                and circuit is not None
+                and _adjoint.batched_trainable(circuit)
+                and _row_vjps_supported(config, circuit)
+            ):
+                # A device Jacobian would split the batch into one tape per
+                # element; the VJP keeps it in one engine call.
+                vjp = True
+            if self.supports_derivatives(
+                replace(config, use_device_jacobian_product=vjp), circuit
+            ):
                 updates = {
                     "gradient_method": "adjoint",
                     "use_device_jacobian_product": vjp,
@@ -922,7 +961,7 @@ class MaestroQubitDevice(Device):
             self._check_adjoint(tape)
             values, vjp, batch, widths = self._parametric_vjp(tape, dy)
             results.append(_adjoint.format_values(values, batch, widths))
-            vjps.append(tuple(np.float64(v) for v in vjp))
+            vjps.append(vjp)
         return tuple(results), tuple(vjps)
 
     # ------------------------------------------------------------------
