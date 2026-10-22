@@ -5,6 +5,30 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project uses [Semantic Versioning](https://semver.org/) (pre-1.0: minor
 releases may contain breaking changes).
 
+## [Unreleased]
+
+### Added
+- Adjoint differentiation on the CPU statevector for analytic expectation
+  values of Pauli strings, tensor products and Hamiltonians/Sums.
+  `diff_method="best"` now resolves to `"adjoint"` there instead of
+  parameter-shift. The device implements `compute_derivatives`,
+  `execute_and_compute_derivatives`, `compute_vjp` and
+  `execute_and_compute_vjp`.
+- `adjoint_backend` option: `"engine"` (Maestro's batched adjoint sweep,
+  `maestro.AdjointProgram`), `"inner_product"` (works with qoro-maestro
+  0.3.7) or `"auto"` (default; engine when available).
+- Broadcast tapes with analytic Pauli expectation values run as one batched
+  engine call instead of one tape per batch element (needs
+  `maestro.AdjointProgram`).
+- `Rot` is a native gate.
+
+### Fixed
+- `qml.adjoint(qml.U3(θ, φ, λ))` applied `U3(-θ, -φ, -λ)` instead of
+  `U3(-θ, -λ, -φ)`.
+- Expectation values and variances of non-diagonal observables returned
+  next to `qml.state()` or `qml.probs()` (and in non-Pauli snapshots) were
+  computed without rotating into the observable's eigenbasis.
+
 ## [0.5.0] - 2026-10-21
 
 ### Changed
