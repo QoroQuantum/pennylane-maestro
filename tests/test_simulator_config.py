@@ -1,4 +1,4 @@
-"""Tests for SimulatorConfig integration (qoro-maestro ≥ 0.3.7).
+"""Tests for SimulatorConfig integration (qoro-maestro ≥ 0.3.8).
 
 Verifies that the device correctly builds a ``maestro.SimulatorConfig``
 from user-provided settings and passes it through every execution path.

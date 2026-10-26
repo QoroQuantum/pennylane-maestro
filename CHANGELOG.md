@@ -15,8 +15,8 @@ releases may contain breaking changes).
   `execute_and_compute_derivatives`, `compute_vjp` and
   `execute_and_compute_vjp`.
 - `adjoint_backend` option: `"engine"` (Maestro's batched adjoint sweep,
-  `maestro.AdjointProgram`), `"inner_product"` (works with qoro-maestro
-  0.3.7) or `"auto"` (default; engine when available).
+  `maestro.AdjointProgram`; default via `"auto"`) or `"inner_product"`
+  (inner-product fallback).
 - Broadcast tapes with analytic Pauli expectation values run as one batched
   engine call instead of one tape per batch element (needs
   `maestro.AdjointProgram`).
@@ -31,6 +31,10 @@ releases may contain breaking changes).
   `jax.jit`, and torch with a mix of broadcast and plain trainable
   parameters still split the batch per element.
 - `Rot` is a native gate.
+
+### Changed
+- **Requires `qoro-maestro>=0.3.8`** (was `>=0.3.7`). Adds adjoint differentiation
+  support via Maestro's native `AdjointProgram`.
 
 ### Fixed
 - `qml.adjoint(qml.U3(θ, φ, λ))` applied `U3(-θ, -φ, -λ)` instead of

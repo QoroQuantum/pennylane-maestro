@@ -12,7 +12,7 @@ license = {text = "GPL-3.0"}
 authors = [{name = "Qoro Quantum", email = "team@qoroquantum.de"}]
 dependencies = [
     "pennylane>=0.38",
-    "qoro-maestro>=0.3.7",
+    "qoro-maestro>=0.3.8",
     "numpy",
 ]
 

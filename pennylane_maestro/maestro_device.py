@@ -101,7 +101,7 @@ def _resolve_alias(value, legacy_value, name: str, legacy_name: str):
     return legacy_value
 
 
-# Observable clustering landed in Maestro after the 0.3.7 release; forward it
+# Observable clustering landed in Maestro 0.3.8; forward it
 # only when the installed SimulatorConfig exposes it.
 _SUPPORTS_OBSERVABLE_CLUSTERING = hasattr(SimulatorConfig(), "max_cluster_qubits")
 
@@ -467,11 +467,9 @@ class MaestroQubitDevice(Device):
         enable_observable_clustering (bool): With causal-cone reduction,
             split multi-observable estimates into groups with disjoint
             lightcones, each simulated on its own register (default: True).
-            Requires a Maestro release newer than 0.3.7; ignored otherwise.
         max_cluster_qubits (int or None): With observable clustering, cap
             each group at this many lightcone qubits.  ``None`` (default)
-            keeps overlapping lightcones together.  Requires a Maestro
-            release newer than 0.3.7; ignored otherwise.
+            keeps overlapping lightcones together.
         gate_fusion (bool or None): Fuse compatible gates.  ``None``
             (default) uses each backend's default.
         seed (int, np.random.Generator, or None): Random seed for reproducible
