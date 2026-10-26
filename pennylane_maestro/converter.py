@@ -35,6 +35,9 @@ GATE_MAP = {
     "CRZ":                  ("crz",   True),
     "ControlledPhaseShift": ("cp",    True),
     "U3":                   ("u",     True),
+    # Rot(a, b, c) = RZ(c) RY(b) RZ(a), emitted as three rotations (see
+    # _apply_operation) so it keeps PennyLane's global phase.
+    "Rot":                  (None,    True),
 }
 
 # Adjoint gates that map to dedicated Maestro instructions.
@@ -126,6 +129,20 @@ def _apply_operation(
             getattr(qc, maestro_method)(*wires)
             return
 
+        if base_name == "Rot":
+            a, b, c = (_to_float(p) for p in base.parameters)
+            wire = int(op.wires[0])
+            qc.rz(wire, -c)
+            qc.ry(wire, -b)
+            qc.rz(wire, -a)
+            return
+
+        # U3(t, f, l)^dagger = U3(-t, -l, -f)
+        if base_name == "U3":
+            t, f, l = (_to_float(p) for p in base.parameters)
+            qc.u(int(op.wires[0]), -t, -l, -f)
+            return
+
         # Parametric gates: adjoint negates the parameter(s)
         if base_name in GATE_MAP:
             method_name, has_params = GATE_MAP[base_name]
@@ -152,6 +169,14 @@ def _apply_operation(
             f"Unsupported operation: {name}. "
             "This should have been decomposed during preprocessing."
         )
+
+    if name == "Rot":
+        a, b, c = (_to_float(p) for p in op.parameters)
+        wire = int(op.wires[0])
+        qc.rz(wire, a)
+        qc.ry(wire, b)
+        qc.rz(wire, c)
+        return
 
     method_name, has_params = GATE_MAP[name]
     wires = [int(w) for w in op.wires]

@@ -4,19 +4,21 @@ Implements the **new** ``pennylane.devices.Device`` interface (schema 3).
 """
 
 import warnings
+from dataclasses import replace
 from os import path
-from typing import Union
 
 import numpy as np
 import pennylane as qml
 from pennylane.devices import Device, ExecutionConfig
 from pennylane.devices.modifiers import simulator_tracking, single_tape_support
-from pennylane.devices.preprocess import decompose as _decompose
+from pennylane.devices.preprocess import decompose as _decompose, validate_device_wires
+from pennylane.devices.qubit import measure as _qubit_measure
+from pennylane.exceptions import DeviceError
 from pennylane.measurements import ExpectationMP, MidMeasureMP, SampleMP
 from pennylane.ops import Snapshot
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
-from pennylane.transforms import defer_measurements
+from pennylane.transforms import broadcast_expand, defer_measurements
 try:
     from pennylane.transforms.core import CompilePipeline
 except ImportError:
@@ -26,12 +28,12 @@ from pennylane.typing import Result, ResultBatch
 import maestro
 from maestro import SimulatorConfig
 
+from pennylane_maestro import adjoint as _adjoint
 from pennylane_maestro.converter import (
     GATE_MAP,
     ADJOINT_MAP,
     tape_to_maestro,
     tape_to_maestro_native,
-    MCMTracker,
     observable_to_pauli_string,
     decompose_hamiltonian_to_pauli_terms,
     _apply_operation,
@@ -99,7 +101,7 @@ def _resolve_alias(value, legacy_value, name: str, legacy_name: str):
     return legacy_value
 
 
-# Observable clustering landed in Maestro after the 0.3.7 release; forward it
+# Observable clustering landed in Maestro 0.3.8; forward it
 # only when the installed SimulatorConfig exposes it.
 _SUPPORTS_OBSERVABLE_CLUSTERING = hasattr(SimulatorConfig(), "max_cluster_qubits")
 
@@ -128,6 +130,15 @@ def _lsb_to_msb_statevector(state: np.ndarray, num_wires: int) -> np.ndarray:
             val >>= 1
         perm[i] = rev
     return state[perm]
+
+
+def _measure_state(mp, state: np.ndarray, num_wires: int):
+    """Measure a PennyLane-ordered statevector on standard wires.
+
+    Unlike ``mp.process_state``, this rotates into the eigenbasis of
+    non-diagonal observables (``expval(X)`` next to ``qml.state()``).
+    """
+    return _qubit_measure(mp, np.reshape(state, (2,) * num_wires))
 
 
 def _counts_to_samples(counts: dict, num_wires: int) -> np.ndarray:
@@ -365,6 +376,34 @@ def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
     return op.name in GATE_MAP
 
 
+@qml.transform
+def _broadcast_expand_unless_native(tape: QuantumScript, native):
+    """Split a broadcast tape into one tape per batch element, unless the
+    device evaluates the whole batch in one engine call."""
+    if tape.batch_size is None or native(tape):
+        return (tape,), lambda results: results[0]
+    return broadcast_expand(tape)
+
+
+def _row_vjps_supported(config: ExecutionConfig, tape: QuantumScript) -> bool:
+    """Whether the interface accepts a VJP with one entry per batch row for
+    the broadcast parameters of ``tape``.
+
+    jax-jit rebuilds JVPs from it and cannot; torch stacks a tape's VJPs
+    into one array, so every trainable parameter must be broadcast.
+    """
+    interface = getattr(config.interface, "value", config.interface)
+    if interface == "jax-jit":
+        return False
+    if interface == "torch":
+        trainable = qml.math.get_trainable_indices(tape.get_parameters(trainable_only=False))
+        return set(trainable) <= _adjoint.batched_params(tape)
+    return True
+
+
+_ADJOINT_BACKENDS = ("auto", "engine", "inner_product")
+
+
 # ---------------------------------------------------------------------------
 # Device
 # ---------------------------------------------------------------------------
@@ -428,15 +467,24 @@ class MaestroQubitDevice(Device):
         enable_observable_clustering (bool): With causal-cone reduction,
             split multi-observable estimates into groups with disjoint
             lightcones, each simulated on its own register (default: True).
-            Requires a Maestro release newer than 0.3.7; ignored otherwise.
         max_cluster_qubits (int or None): With observable clustering, cap
             each group at this many lightcone qubits.  ``None`` (default)
-            keeps overlapping lightcones together.  Requires a Maestro
-            release newer than 0.3.7; ignored otherwise.
+            keeps overlapping lightcones together.
         gate_fusion (bool or None): Fuse compatible gates.  ``None``
             (default) uses each backend's default.
         seed (int, np.random.Generator, or None): Random seed for reproducible
             stochastic simulations (sampling, measurements, noise).
+        adjoint_backend (str): How analytic derivatives are computed for
+            ``diff_method="adjoint"`` (and ``"best"``) on the CPU statevector
+            (``simulator_type="QCSim"``, ``simulation_type="Statevector"``):
+
+            - ``"auto"`` (default) — ``"engine"`` when the installed
+              qoro-maestro provides ``AdjointProgram``, else ``"inner_product"``
+            - ``"engine"`` — Maestro's batched adjoint sweep
+            - ``"inner_product"`` — one ``maestro.inner_product`` per
+              parameter and Pauli term
+
+            Other configurations, and finite shots, use parameter-shift.
 
     Usage examples::
 
@@ -490,6 +538,7 @@ class MaestroQubitDevice(Device):
         max_cluster_qubits: int | None = None,
         gate_fusion: bool | None = None,
         seed=None,
+        adjoint_backend: str = "auto",
     ):
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -552,6 +601,21 @@ class MaestroQubitDevice(Device):
                 self._seed = int(seed)
         else:
             self._seed = None
+
+        if adjoint_backend not in _ADJOINT_BACKENDS:
+            raise ValueError(
+                f"Unknown adjoint_backend '{adjoint_backend}'. "
+                f"Valid options: {list(_ADJOINT_BACKENDS)}"
+            )
+        if adjoint_backend == "engine" and not _adjoint.HAS_ENGINE_ADJOINT:
+            raise ValueError(
+                "adjoint_backend='engine' needs a qoro-maestro build with "
+                "AdjointProgram."
+            )
+        if adjoint_backend == "auto":
+            adjoint_backend = "engine" if _adjoint.HAS_ENGINE_ADJOINT else "inner_product"
+        self._adjoint_backend = adjoint_backend
+        self._templates = _adjoint.TemplateCache()
 
     @property
     def seed(self) -> int | None:
@@ -617,16 +681,25 @@ class MaestroQubitDevice(Device):
             else None
         )
 
-        from pennylane.devices.preprocess import validate_device_wires
-        from pennylane.transforms import broadcast_expand
-
         program = CompilePipeline()
 
         # ── Wire validation ──────────────────────────────────────────────
         program.add_transform(validate_device_wires, self.wires, name=self.name)
 
         # ── Parameter broadcasting / batching ───────────────────────────
-        program.add_transform(broadcast_expand)
+        # Analytic expectation values and probabilities keep the batch in
+        # one tape and run it in one engine call; everything else is split
+        # per element. Trainable broadcast parameters stay batched only
+        # with a device VJP, which returns one gradient entry per row.
+        device_vjp = config.gradient_method == "adjoint" and bool(
+            config.use_device_jacobian_product
+        )
+
+        def native(tape):
+            trainable_ok = device_vjp and _row_vjps_supported(config, tape)
+            return self._batches_natively(tape, trainable_ok=trainable_ok)
+
+        program.add_transform(_broadcast_expand_unless_native, native=native)
 
         # ── MCM handling ────────────────────────────────────────────────
         # Only apply defer_measurements when explicitly requested.
@@ -656,17 +729,243 @@ class MaestroQubitDevice(Device):
         self,
         circuits: QuantumScriptOrBatch,
         execution_config: ExecutionConfig | None = None,
-    ) -> Union[Result, ResultBatch]:
+    ) -> Result | ResultBatch:
         results = []
         for tape in circuits:
             if tape.batch_size is not None:
-                from pennylane.transforms import broadcast_expand
+                if self._batches_natively(tape, trainable_ok=True):
+                    results.append(self._execute_parametric(tape))
+                    continue
                 tapes, fn = broadcast_expand(tape)
                 tape_results = [self._execute_single(t) for t in tapes]
                 results.append(fn(tape_results))
             else:
                 results.append(self._execute_single(tape))
         return tuple(results)
+
+    # ------------------------------------------------------------------
+    # Parametric statevector path: batches and analytic derivatives
+    # ------------------------------------------------------------------
+
+    def _parametric_available(self) -> bool:
+        """CPU statevector, where the parametric path is exact."""
+        return (
+            self._simulator_type == maestro.SimulatorType.QCSim
+            and self._simulation_type == maestro.SimulationType.Statevector
+        )
+
+    def _max_probability_wires(self, vjp: bool = True) -> int:
+        """Most ``qml.probs`` wires taken on the adjoint path."""
+        if self._adjoint_backend != "engine" or not _adjoint.HAS_ENGINE_PROBABILITIES:
+            return 0
+        if vjp:
+            return _adjoint.MAX_PROBABILITY_WIRES_VJP
+        return _adjoint.MAX_PROBABILITY_WIRES_JACOBIAN
+
+    def _batches_natively(self, tape: QuantumScript, trainable_ok: bool = False) -> bool:
+        """Whether a broadcast tape runs as one batch on the engine.
+
+        Unless ``trainable_ok``, a tape whose trainable parameters carry the
+        broadcast dimension is split: a device Jacobian has no entry per
+        batch element for them."""
+        return (
+            _adjoint.HAS_ENGINE_ADJOINT
+            and self._parametric_available()
+            and _adjoint.is_supported(
+                tape,
+                trainable=(),
+                max_probability_wires=_adjoint.MAX_PROBABILITY_WIRES_VJP
+                if _adjoint.HAS_ENGINE_PROBABILITIES
+                else 0,
+            )
+            and (trainable_ok or not _adjoint.batched_trainable(tape))
+        )
+
+    def _prepare_parametric(self, tape: QuantumScript):
+        tape = tape.map_to_standard_wires()
+        num_wires = max(len(tape.wires), 1)
+        template = self._templates.get(tape)
+        angles, batch = template.angles(tape)
+        readouts, widths = _adjoint.readouts(tape, num_wires)
+        return tape, template, angles, batch, readouts, widths
+
+    def _execute_parametric(self, tape: QuantumScript) -> Result:
+        """Expectation values and probabilities of a (possibly broadcast) tape."""
+        _, template, angles, batch, readouts, widths = self._prepare_parametric(tape)
+        raw = template.program.expectation_values(
+            readouts, angles, self._build_config()
+        )
+        return _adjoint.format_values(raw["expectation_values"], batch, widths)
+
+    def _parametric_jacobian(self, tape: QuantumScript):
+        """Values ``(rows, V)``, Jacobian ``(rows, V, trainable)``, batch size
+        and the number of values per measurement."""
+        tape, template, angles, batch, observables, widths = self._prepare_parametric(tape)
+        config = self._build_config()
+        if self._adjoint_backend == "engine":
+            raw = template.program.jacobian(observables, angles, config)
+            values, jac = raw["expectation_values"], raw["jacobian"]
+        else:
+            values = np.empty((len(angles), len(observables)))
+            jac = np.empty((len(angles), len(observables), len(template.slot_index)))
+            all_paulis = []
+            term_slices = []
+            for terms in observables:
+                start = len(all_paulis)
+                coeffs = [c for c, _ in terms]
+                all_paulis.extend(ps for _, ps in terms)
+                term_slices.append((start, len(terms), coeffs))
+
+            for row, a in enumerate(angles):
+                qc = template.circuit(a)
+                if all_paulis:
+                    ev = qc.estimate(all_paulis, config)["expectation_values"]
+                    for m, (start, count, coeffs) in enumerate(term_slices):
+                        values[row, m] = sum(
+                            c * v for c, v in zip(coeffs, ev[start:start + count])
+                        )
+                else:
+                    values[row, :] = 0.0
+                jac[row] = _adjoint.inner_product_jacobian(template, a, observables, config)
+        jac = (jac @ template.selector)[:, :, list(tape.trainable_params)]
+        return values, jac, batch, widths
+
+    def _parametric_vjp(self, tape: QuantumScript, dy):
+        """Values ``(rows, V)``, the VJP per trainable parameter (one entry
+        per row for broadcast parameters), batch size and the number of
+        values per measurement."""
+        if self._adjoint_backend != "engine":
+            values, jac, batch, widths = self._parametric_jacobian(tape)
+            cot = _adjoint.cotangent_matrix(dy, widths, batch)
+            row_vjp = np.einsum("rm,rmk->rk", cot, jac)
+            return values, _adjoint.reduce_vjp(row_vjp, tape), batch, widths
+        mapped, template, angles, batch, readouts, widths = self._prepare_parametric(tape)
+        cot = _adjoint.cotangent_matrix(dy, widths, batch)
+        raw = template.program.vjp(readouts, cot, angles, self._build_config())
+        row_vjp = (raw["vjp"] @ template.selector)[:, list(mapped.trainable_params)]
+        return raw["expectation_values"], _adjoint.reduce_vjp(row_vjp, tape), batch, widths
+
+    def _check_adjoint(self, tape: QuantumScript, vjp: bool = False):
+        if not (
+            self._parametric_available()
+            and _adjoint.is_supported(
+                tape,
+                trainable=tape.trainable_params,
+                max_probability_wires=self._max_probability_wires(vjp=vjp),
+            )
+        ):
+            raise DeviceError(
+                f"{self.name} cannot compute adjoint derivatives of this circuit."
+            )
+
+    # ------------------------------------------------------------------
+    # Derivatives
+    # ------------------------------------------------------------------
+
+    def supports_derivatives(
+        self,
+        execution_config: ExecutionConfig | None = None,
+        circuit: QuantumScript | None = None,
+    ) -> bool:
+        """Adjoint derivatives of analytic Pauli/Hamiltonian expectation values
+        on the CPU statevector, and of ``qml.probs`` with the engine backend
+        (up to 10 wires with a device Jacobian, 24 with a device VJP). Other
+        cases fall back to PennyLane's gradient transforms."""
+        if execution_config is None:
+            return self._parametric_available()
+        if execution_config.gradient_method not in ("adjoint", "best"):
+            return False
+        if not self._parametric_available():
+            return False
+        if circuit is None:
+            return True
+        vjp = bool(execution_config.use_device_jacobian_product)
+        return _adjoint.is_supported(
+            circuit, max_probability_wires=self._max_probability_wires(vjp)
+        )
+
+    def setup_execution_config(
+        self,
+        config: ExecutionConfig | None = None,
+        circuit: QuantumScript | None = None,
+    ) -> ExecutionConfig:
+        config = config or ExecutionConfig()
+        if config.gradient_method in ("best", "adjoint"):
+            vjp = config.use_device_jacobian_product
+            if vjp is None or (
+                config.gradient_method == "best"
+                and circuit is not None
+                and _adjoint.batched_trainable(circuit)
+                and _row_vjps_supported(config, circuit)
+            ):
+                # A device Jacobian would split the batch into one tape per
+                # element; the VJP keeps it in one engine call.
+                vjp = True
+            if self.supports_derivatives(
+                replace(config, use_device_jacobian_product=vjp), circuit
+            ):
+                updates = {
+                    "gradient_method": "adjoint",
+                    "use_device_jacobian_product": vjp,
+                    "use_device_gradient": True
+                    if config.use_device_gradient is None
+                    else config.use_device_gradient,
+                }
+                if config.grad_on_execution is None:
+                    updates["grad_on_execution"] = not vjp
+                config = replace(config, **updates)
+            elif config.gradient_method == "best":
+                config = replace(config, gradient_method=qml.gradients.param_shift)
+        return super().setup_execution_config(config, circuit)
+
+    def compute_derivatives(
+        self,
+        circuits: QuantumScriptOrBatch,
+        execution_config: ExecutionConfig | None = None,
+    ):
+        return self.execute_and_compute_derivatives(circuits, execution_config)[1]
+
+    def execute_and_compute_derivatives(
+        self,
+        circuits: QuantumScriptOrBatch,
+        execution_config: ExecutionConfig | None = None,
+    ):
+        results, jacs = [], []
+        for tape in circuits:
+            self._check_adjoint(tape, vjp=False)
+            values, jac, batch, widths = self._parametric_jacobian(tape)
+            results.append(_adjoint.format_values(values, batch, widths))
+            jacs.append(_adjoint.format_jacobian(jac, batch, widths))
+        return tuple(results), tuple(jacs)
+
+    def supports_vjp(
+        self,
+        execution_config: ExecutionConfig | None = None,
+        circuit: QuantumScript | None = None,
+    ) -> bool:
+        return self.supports_derivatives(execution_config, circuit)
+
+    def compute_vjp(
+        self,
+        circuits: QuantumScriptOrBatch,
+        cotangents,
+        execution_config: ExecutionConfig | None = None,
+    ):
+        return self.execute_and_compute_vjp(circuits, cotangents, execution_config)[1]
+
+    def execute_and_compute_vjp(
+        self,
+        circuits: QuantumScriptOrBatch,
+        cotangents,
+        execution_config: ExecutionConfig | None = None,
+    ):
+        results, vjps = [], []
+        for tape, dy in zip(circuits, cotangents):
+            self._check_adjoint(tape, vjp=True)
+            values, vjp, batch, widths = self._parametric_vjp(tape, dy)
+            results.append(_adjoint.format_values(values, batch, widths))
+            vjps.append(vjp)
+        return tuple(results), tuple(vjps)
 
     # ------------------------------------------------------------------
     # Single tape execution
@@ -759,7 +1058,7 @@ class MaestroQubitDevice(Device):
         state = _lsb_to_msb_statevector(state, num_wires)
 
         results = tuple(
-            mp.process_state(state, tape.wires) for mp in tape.measurements
+            _measure_state(mp, state, num_wires) for mp in tape.measurements
         )
         if len(tape.measurements) == 1:
             return results[0]
@@ -1101,7 +1400,7 @@ class MaestroQubitDevice(Device):
         state = np.array(amplitudes, dtype=np.complex128)
         state = _lsb_to_msb_statevector(state, num_wires)
         results = tuple(
-            mp.process_state(state, tape.wires) for mp in tape.measurements
+            _measure_state(mp, state, num_wires) for mp in tape.measurements
         )
         if len(tape.measurements) == 1:
             return results[0]
@@ -1191,7 +1490,7 @@ class MaestroQubitDevice(Device):
             state = _lsb_to_msb_statevector(state, num_wires)
 
             for tag, measurement in fallback_batch:
-                result = measurement.process_state(state, tape.wires)
+                result = _measure_state(measurement, state, num_wires)
                 self._store_snapshot(tag, result)
 
     def _store_snapshot(self, tag, result):
@@ -1234,11 +1533,9 @@ class MaestroQubitDevice(Device):
                 _add_pauli(ps)
 
         measure_at_steps = sorted(
-            list(
-                set(
-                    pattern["steps"]
-                    + ([pattern["final_step"]] if pattern["terminal_terms"] else [])
-                )
+            set(
+                pattern["steps"]
+                + ([pattern["final_step"]] if pattern["terminal_terms"] else [])
             )
         )
 
@@ -1377,7 +1674,7 @@ class MaestroQubitDevice(Device):
         raw = maestro.incremental_evolve(
             init_circuit,
             step_circuit,
-            sorted(list(measure_at_steps)),
+            sorted(measure_at_steps),
             all_paulis,
             config,
         )
