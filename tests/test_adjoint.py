@@ -7,8 +7,10 @@ import pennylane as qml
 import pennylane.numpy as pnp
 import pytest
 
+from packaging.version import Version
 from pennylane_maestro import adjoint as _adjoint
 
+PL_LT_043 = Version(qml.__version__) < Version("0.43")
 BACKENDS = ["inner_product"] + (["engine"] if _adjoint.HAS_ENGINE_ADJOINT else [])
 needs_engine = pytest.mark.skipif(
     not _adjoint.HAS_ENGINE_ADJOINT, reason="qoro-maestro build without AdjointProgram"
@@ -168,8 +170,9 @@ def test_trainable_broadcast_parameters(backend, kwargs, derivative_tapes):
         got = grad(f)
     for a, b in zip(got, grad(ref)):
         assert qml.math.allclose(a, b, atol=1e-8)
-    assert tracker.totals.get("derivatives", 0) == derivative_tapes
-    assert tracker.totals.get("vjp_batches", 0) == (0 if derivative_tapes else 1)
+    expected_tapes = 5 if (PL_LT_043 and not kwargs) else derivative_tapes
+    assert tracker.totals.get("derivatives", 0) == expected_tapes
+    assert tracker.totals.get("vjp_batches", 0) == (0 if expected_tapes else 1)
 
 
 @needs_engine
@@ -320,6 +323,10 @@ def test_probabilities_match_default_qubit(batched, device_vjp, readout):
     assert qml.math.allclose(qml.jacobian(flat(dev))(weights), qml.jacobian(flat(ref))(weights), atol=1e-8)
 
 
+@pytest.mark.skipif(
+    PL_LT_043,
+    reason="PennyLane < 0.43 get_best_diff_method does not inspect QNode.execute_kwargs['device_vjp']",
+)
 @needs_engine_probs
 def test_wide_probabilities_need_device_vjp():
     def f(w):
