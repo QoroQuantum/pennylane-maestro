@@ -7,6 +7,21 @@ releases may contain breaking changes).
 
 ## [Unreleased]
 
+### Added
+- `backend` option: `"qoro"` runs circuits on the QoroService cloud through
+  Divi, and any Divi `CircuitRunner` (a configured `QoroService`,
+  `MaestroSimulator`, ...) can be passed instead. Each batch of tapes becomes
+  at most one expectation-value job and one counts job. Adjoint derivatives
+  of analytic Pauli/Hamiltonian expectation values run as Divi `submit_vjp`
+  jobs on CPU statevector targets; `"best"` falls back to parameter-shift
+  otherwise. Install with `pip install "pennylane-maestro[cloud]"` (Divi 0.16+,
+  Python 3.11+).
+
+### Changed
+- `simulator_type` and `simulation_type` default to `None`, which is
+  `"QCSim"` / `"Statevector"` on the local engine as before, and lets a Divi
+  backend choose.
+
 ## [0.6.0] - 2026-10-26
 
 ### Added

@@ -168,6 +168,7 @@ dev = qp.device("maestro.qubit", wires=20, gate_fusion=True,
 | `gate_fusion` | `None` | Fuse compatible gates. `None` uses each backend's default. |
 | `seed` | `None` | Seed for reproducible sampling and noise. |
 | `adjoint_backend` | `"auto"` | How adjoint derivatives are computed (see [Gradients](#gradients)): `"engine"`, `"inner_product"`, or `"auto"` (engine by default). |
+| `backend` | `"local"` | Where circuits run: `"local"`, `"qoro"` (the QoroService cloud), or a Divi `CircuitRunner`. See [QoroService cloud](#qoroservice-cloud). |
 
 `use_double_precision=True/False` is still accepted as shorthand for `precision="double"/"single"`. The legacy names `pp_pauli_weight_threshold` (→ `pp_max_pauli_weight`) and `pp_steps_between_trims` (→ `pp_gates_between_trims`) still work but emit a `DeprecationWarning`.
 
@@ -190,6 +191,42 @@ def circuit(weights, x):
 * The inner-product fallback (`adjoint_backend="inner_product"`) is also available, evaluating one `maestro.inner_product` per gate parameter and Pauli term (expectation values only).
 * Finite shots, mid-circuit measurements, other simulation types (MPS, stabilizer, ...) and other measurements (`var`, `state`, samples, `probs` beyond the wire limits above) use parameter-shift, as before. `diff_method="adjoint"` raises for these.
 * With PennyLane's default `device_vjp=False`, the Jacobian is computed together with the forward pass. This is the fastest choice for training, but plain forward calls with trainable (`requires_grad=True`) parameters also pay for the Jacobian. For inference-heavy use, pass `device_vjp=True` to the QNode: forward calls then only simulate, and the gradient is a separate VJP pass (on a 20-qubit, 32-sample VQC: forward 0.46 s instead of 1.73 s, loss+grad 2.55 s instead of 1.82 s).
+
+### QoroService cloud
+
+`backend="qoro"` sends circuits through [Divi](https://github.com/QoroQuantum/divi) to the QoroService cloud instead of simulating them in-process. It needs Divi 0.16 or later, which needs Python 3.11+:
+
+```bash
+pip install "pennylane-maestro[cloud]"
+export QORO_API_KEY=...        # or put it in a .env file
+```
+
+```python
+dev = qp.device("maestro.qubit", wires=20, backend="qoro",
+                simulation_type="MatrixProductState", max_bond_dimension=64)
+```
+
+The job target (simulator cluster or QPU system) comes from the defaults saved with `divi-config-helper`, `qoro_maestro` otherwise. Device options that differ from Maestro's defaults (`max_bond_dimension`, `seed`, ...), and `simulator_type`/`simulation_type` whenever they are given, are layered over the saved Maestro defaults; options left unset let the service choose. They apply to simulator targets only: with a QPU target the device warns and leaves them out. For full control, pass a configured Divi backend instead; its own `maestro_config` applies:
+
+```python
+from divi.backends import JobConfig, MaestroConfig, QoroService
+
+service = QoroService(job_config=JobConfig(simulator_cluster="qoro_maestro"),
+                      maestro_config=MaestroConfig(seed=7))
+dev = qp.device("maestro.qubit", wires=20, backend=service)
+print(dev.backend.get_credit_balance())
+```
+
+Any Divi `CircuitRunner` works the same way, e.g. `divi.backends.MaestroSimulator()` to try a script offline.
+
+How tapes run:
+
+* Each batch of tapes is at most one expectation-value job and one sampling job.
+  * The expectation-value job takes analytic tapes, and finite-shot tapes of Pauli-word expectation values (exact, as on the local engine). `var` follows from `<O^2>`; `qml.probs`, mid-circuit measurement values and observables without a Pauli form (`Hermitian`, `Projector`, `qml.probs(op=...)`) are read exactly from the Pauli-Z expectation values over their wires (at most 10), after the observable's diagonalizing gates.
+  * The sampling job takes the other finite-shot tapes: one circuit per measurement basis, as default.qubit groups its samples, and per shot copy.
+* `diff_method="adjoint"` (and `"best"`) differentiates analytic Pauli/Hamiltonian expectation values on the service with Divi's adjoint VJPs, as one `submit_vjp` job per register width in the batch; with the default `device_vjp=False` the values come back in the same job. This needs a CPU statevector target (`QCSim`, `Statevector`, which the service picks when they are unset). Otherwise, and for finite shots or second derivatives (`max_diff=2`), `"best"` uses parameter-shift, run as ordinary jobs.
+* Mid-circuit measurements are deferred (no postselection), and broadcast tapes are split per element. `qml.Snapshot`s with a measurement run as extra tapes in the same jobs under `qml.snapshots`.
+* Not available: `qml.state()` and other state-based measurements, state snapshots, and `dev.incremental_evolve`.
 
 ## Examples
 

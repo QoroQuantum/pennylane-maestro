@@ -29,6 +29,7 @@ import maestro
 from maestro import SimulatorConfig
 
 from pennylane_maestro import adjoint as _adjoint
+from pennylane_maestro import divi_backend as _divi
 from pennylane_maestro.converter import (
     GATE_MAP,
     ADJOINT_MAP,
@@ -376,6 +377,20 @@ def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
     return op.name in GATE_MAP
 
 
+def _divi_stopping_condition(op: qml.operation.Operator) -> bool:
+    """Return ``True`` for ops sent to a Divi backend as they are.
+
+    Snapshots stay for the device to run as their own tapes; mid-circuit
+    measurements are deferred before decomposition. Divi converts
+    ``Identity`` on one wire only.
+    """
+    if isinstance(op, Snapshot):
+        return True
+    if op.name == "Identity":
+        return len(op.wires) == 1
+    return op.name in _divi.DIVI_GATES
+
+
 @qml.transform
 def _broadcast_expand_unless_native(tape: QuantumScript, native):
     """Split a broadcast tape into one tape per batch element, unless the
@@ -401,7 +416,22 @@ def _row_vjps_supported(config: ExecutionConfig, tape: QuantumScript) -> bool:
     return True
 
 
+def _divi_values(values: np.ndarray):
+    """One tape's expectation values ``(measurements,)`` in PennyLane's format."""
+    if not len(values):
+        return ()
+    return _adjoint.format_values(values[None, :], None, [1] * len(values))
+
+
+def _divi_jacobian(jac: np.ndarray):
+    """One tape's Jacobian ``(measurements, trainable)`` in PennyLane's format."""
+    if not len(jac):
+        return ()
+    return _adjoint.format_jacobian(jac[None, :, :], None, [1] * len(jac))
+
+
 _ADJOINT_BACKENDS = ("auto", "engine", "inner_product")
+_BACKENDS = ("local", "qoro")
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +446,9 @@ class MaestroQubitDevice(Device):
     Args:
         wires (int or Iterable): Number of wires, or explicit wire labels.
         shots (int or None): Default shot count.  ``None`` → analytic mode.
-        simulator_type (str): Backend engine. Options:
+        simulator_type (str or None): Backend engine (``None``, the default,
+            is ``"QCSim"`` locally and leaves the choice to a Divi backend).
+            Options:
 
             - ``"QCSim"`` — Qoro's optimised CPU simulator (default)
             - ``"Gpu"`` — CUDA-accelerated GPU simulator
@@ -427,7 +459,9 @@ class MaestroQubitDevice(Device):
             - ``"DistributedMpiGpu"`` — State distributed across MPI ranks/GPUs
             - ``"QuestSim"`` — QuEST simulator
 
-        simulation_type (str): Simulation algorithm. Options:
+        simulation_type (str or None): Simulation algorithm (``None``, the
+            default, is ``"Statevector"`` locally and leaves the choice to a
+            Divi backend). Options:
 
             - ``"Statevector"`` — Full statevector (default)
             - ``"MatrixProductState"`` — MPS / tensor-train
@@ -486,6 +520,29 @@ class MaestroQubitDevice(Device):
 
             Other configurations, and finite shots, use parameter-shift.
 
+        backend (str or divi.backends.CircuitRunner): Where circuits run:
+
+            - ``"local"`` (default) — the Maestro engine in this process
+            - ``"qoro"`` — the QoroService cloud through Divi. The API key
+              comes from ``QORO_API_KEY`` (environment or ``.env`` file) and
+              the job target from the defaults saved by
+              ``divi-config-helper``; the Maestro options above that differ
+              from Maestro's defaults (and ``simulator_type`` /
+              ``simulation_type`` whenever given) are layered over the saved
+              ones, on simulator targets
+            - a Divi ``CircuitRunner`` such as a configured
+              ``divi.backends.QoroService`` — used as it is, with its own
+              ``maestro_config``
+
+            Needs Divi 0.16+: ``pip install 'pennylane-maestro[cloud]'``. Each
+            batch of tapes becomes at most one expectation-value job and one
+            sampling job. Adjoint derivatives (``diff_method="adjoint"`` or
+            ``"best"``) of analytic Pauli/Hamiltonian expectation values run
+            as one ``submit_vjp`` job per register width when the backend
+            differentiates on the CPU statevector; otherwise parameter-shift
+            is used. ``qml.state()`` and other state-based measurements are
+            not available, nor is :meth:`incremental_evolve`.
+
     Usage examples::
 
         # CPU statevector (default)
@@ -509,6 +566,9 @@ class MaestroQubitDevice(Device):
 
         # Reproducible random sampling with seed
         dev = qml.device("maestro.qubit", wires=5, shots=1000, seed=42)
+
+        # The QoroService cloud through Divi
+        dev = qml.device("maestro.qubit", wires=20, backend="qoro")
     """
 
     name = "maestro.qubit"
@@ -519,8 +579,8 @@ class MaestroQubitDevice(Device):
         self,
         wires=None,
         shots=None,
-        simulator_type: str = "QCSim",
-        simulation_type: str = "Statevector",
+        simulator_type: str | None = None,
+        simulation_type: str | None = None,
         max_bond_dimension=None,
         singular_value_threshold=None,
         precision: str | None = None,
@@ -539,7 +599,14 @@ class MaestroQubitDevice(Device):
         gate_fusion: bool | None = None,
         seed=None,
         adjoint_backend: str = "auto",
+        backend="local",
     ):
+        if isinstance(backend, str) and backend not in _BACKENDS:
+            raise ValueError(
+                f"Unknown backend '{backend}'. Valid options: {list(_BACKENDS)} "
+                "or a divi.backends.CircuitRunner."
+            )
+        local = isinstance(backend, str) and backend == "local"
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -547,14 +614,25 @@ class MaestroQubitDevice(Device):
             )
             super().__init__(wires=wires, shots=shots)
         self._simulator_type = _resolve_enum(
-            simulator_type, _SIMULATOR_TYPE_MAP, "SimulatorType"
+            "QCSim" if simulator_type is None else simulator_type,
+            _SIMULATOR_TYPE_MAP,
+            "SimulatorType",
         )
         self._simulation_type = _resolve_enum(
-            simulation_type, _SIMULATION_TYPE_MAP, "SimulationType"
+            "Statevector" if simulation_type is None else simulation_type,
+            _SIMULATION_TYPE_MAP,
+            "SimulationType",
         )
+        # Engine choices made explicitly, sent to a Divi backend even where
+        # they equal Maestro's defaults.
+        explicit_types = {}
+        if simulator_type is not None:
+            explicit_types["simulator_type"] = self._simulator_type
+        if simulation_type is not None:
+            explicit_types["simulation_type"] = self._simulation_type
 
         # Auto-initialize GPU backend when requested
-        if self._simulator_type == maestro.SimulatorType.Gpu:
+        if local and self._simulator_type == maestro.SimulatorType.Gpu:
             if not maestro.init_gpu():
                 warnings.warn(
                     "maestro.init_gpu() failed — GPU simulation may "
@@ -617,10 +695,23 @@ class MaestroQubitDevice(Device):
         self._adjoint_backend = adjoint_backend
         self._templates = _adjoint.TemplateCache()
 
+        # Remote execution through Divi (None runs on the local engine).
+        self._divi = None
+        if not local:
+            self._divi = _divi.DiviExecutor(
+                _divi.resolve_backend(backend, self._build_config(), explicit_types)
+            )
+
     @property
     def seed(self) -> int | None:
         """Return the random seed configured on the device."""
         return self._seed
+
+    @property
+    def backend(self):
+        """The Divi ``CircuitRunner`` circuits run on, or ``None`` when they
+        run on the local Maestro engine."""
+        return None if self._divi is None else self._divi.runner
 
     def _build_config(self) -> SimulatorConfig:
         """Build a Maestro ``SimulatorConfig`` from device settings."""
@@ -675,6 +766,8 @@ class MaestroQubitDevice(Device):
         produces physically correct results for QEC-style circuits.
         """
         config = execution_config or ExecutionConfig()
+        if self._divi is not None:
+            return self._divi_preprocess_transforms()
         mcm_method = (
             config.mcm_config.mcm_method
             if config.mcm_config is not None
@@ -721,6 +814,24 @@ class MaestroQubitDevice(Device):
 
         return program
 
+    def _divi_preprocess_transforms(self) -> CompilePipeline:
+        """Preprocessing for a Divi backend: every broadcast tape is split,
+        mid-circuit measurements are always deferred, and gates are
+        decomposed to the set Divi converts and differentiates."""
+        program = CompilePipeline()
+        program.add_transform(validate_device_wires, self.wires, name=self.name)
+        if not self.wires:
+            program.add_transform(_divi.fill_measurement_wires)
+        program.add_transform(_broadcast_expand_unless_native, native=lambda tape: False)
+        program.add_transform(defer_measurements, allow_postselect=False)
+        program.add_transform(
+            _decompose,
+            stopping_condition=_divi_stopping_condition,
+            skip_initial_state_prep=False,
+            name=self.name,
+        )
+        return program
+
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
@@ -730,6 +841,8 @@ class MaestroQubitDevice(Device):
         circuits: QuantumScriptOrBatch,
         execution_config: ExecutionConfig | None = None,
     ) -> Result | ResultBatch:
+        if self._divi is not None:
+            return self._divi.execute(circuits, self._debugger)
         results = []
         for tape in circuits:
             if tape.batch_size is not None:
@@ -870,7 +983,21 @@ class MaestroQubitDevice(Device):
         """Adjoint derivatives of analytic Pauli/Hamiltonian expectation values
         on the CPU statevector, and of ``qml.probs`` with the engine backend
         (up to 10 wires with a device Jacobian, 24 with a device VJP). Other
-        cases fall back to PennyLane's gradient transforms."""
+        cases fall back to PennyLane's gradient transforms.
+
+        With a Divi backend: first-order adjoint derivatives of analytic
+        Pauli/Hamiltonian expectation values, when the backend computes VJPs.
+        """
+        if self._divi is not None:
+            if not self._divi.supports_vjp:
+                return False
+            if execution_config is None:
+                return True
+            if execution_config.gradient_method not in ("adjoint", "best"):
+                return False
+            if execution_config.derivative_order > 1:
+                return False  # the device Jacobian is not itself differentiable
+            return circuit is None or _adjoint.is_supported(circuit, max_probability_wires=0)
         if execution_config is None:
             return self._parametric_available()
         if execution_config.gradient_method not in ("adjoint", "best"):
@@ -890,6 +1017,8 @@ class MaestroQubitDevice(Device):
         circuit: QuantumScript | None = None,
     ) -> ExecutionConfig:
         config = config or ExecutionConfig()
+        if self._divi is not None:
+            return super().setup_execution_config(self._divi_gradient_config(config, circuit), circuit)
         if config.gradient_method in ("best", "adjoint"):
             vjp = config.use_device_jacobian_product
             if vjp is None or (
@@ -918,6 +1047,43 @@ class MaestroQubitDevice(Device):
                 config = replace(config, gradient_method=qml.gradients.param_shift)
         return super().setup_execution_config(config, circuit)
 
+    def _divi_gradient_config(
+        self, config: ExecutionConfig, circuit: QuantumScript | None
+    ) -> ExecutionConfig:
+        """Resolve ``"best"``/``"adjoint"`` for a Divi backend.
+
+        The device Jacobian (``device_vjp=False``, the default) comes back
+        with the values in one job, one cotangent row per measurement; a
+        device VJP costs a forward job plus a VJP job.
+        """
+        if config.gradient_method not in ("best", "adjoint"):
+            return config
+        if self.supports_derivatives(replace(config, gradient_method="adjoint"), circuit):
+            vjp = bool(config.use_device_jacobian_product)
+            updates = {
+                "gradient_method": "adjoint",
+                "use_device_jacobian_product": vjp,
+                "use_device_gradient": True
+                if config.use_device_gradient is None
+                else config.use_device_gradient,
+            }
+            if config.grad_on_execution is None:
+                updates["grad_on_execution"] = not vjp
+            return replace(config, **updates)
+        if config.gradient_method == "best":
+            return replace(config, gradient_method=qml.gradients.param_shift)
+        return config
+
+    def _check_divi_adjoint(self, tape: QuantumScript):
+        if not (
+            self._divi.supports_vjp
+            and _adjoint.is_supported(tape, trainable=tape.trainable_params, max_probability_wires=0)
+        ):
+            raise DeviceError(
+                f"{self.name} cannot compute adjoint derivatives of this circuit "
+                f"on {type(self._divi.runner).__name__}."
+            )
+
     def compute_derivatives(
         self,
         circuits: QuantumScriptOrBatch,
@@ -930,6 +1096,15 @@ class MaestroQubitDevice(Device):
         circuits: QuantumScriptOrBatch,
         execution_config: ExecutionConfig | None = None,
     ):
+        if self._divi is not None:
+            for tape in circuits:
+                self._check_divi_adjoint(tape)
+            rows = [np.eye(len(tape.measurements)) for tape in circuits]
+            values, jacs = self._divi.gradients(circuits, rows)
+            return (
+                tuple(_divi_values(v) for v in values),
+                tuple(_divi_jacobian(j) for j in jacs),
+            )
         results, jacs = [], []
         for tape in circuits:
             self._check_adjoint(tape, vjp=False)
@@ -959,6 +1134,18 @@ class MaestroQubitDevice(Device):
         cotangents,
         execution_config: ExecutionConfig | None = None,
     ):
+        if self._divi is not None:
+            rows = []
+            for tape, dy in zip(circuits, cotangents):
+                self._check_divi_adjoint(tape)
+                rows.append(
+                    _adjoint.cotangent_matrix(dy, [1] * len(tape.measurements), None)
+                )
+            values, row_vjps = self._divi.gradients(circuits, rows)
+            return (
+                tuple(_divi_values(v) for v in values),
+                tuple(_adjoint.reduce_vjp(r, t) for r, t in zip(row_vjps, circuits)),
+            )
         results, vjps = [], []
         for tape, dy in zip(circuits, cotangents):
             self._check_adjoint(tape, vjp=True)
@@ -1620,6 +1807,11 @@ class MaestroQubitDevice(Device):
                 - ``"dynamic_bond_dims"``: bond dimensions per step (for MPS)
                 - ``"max_bond_dim_reached"``: max bond dimension reached
         """
+        if self._divi is not None:
+            raise DeviceError(
+                "incremental_evolve runs on the local Maestro engine; create the "
+                "device with backend='local'."
+            )
         num_wires = len(self.wires) if len(self.wires) > 0 else 1
         # Map device wire labels to consecutive 0-indexed qubits
         wire_map = {w: i for i, w in enumerate(self.wires)}
