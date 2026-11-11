@@ -316,7 +316,7 @@ def plot_results(h_values, zz, mz, snapshots, trotter_err):
 
     out = 'ising_quench_dynamics.png'
     plt.savefig(out, dpi=150, facecolor=fig.get_facecolor())
-    plt.show()
+    plt.close(fig)
     print(f"\n  📊 Saved to {out}")
 
 

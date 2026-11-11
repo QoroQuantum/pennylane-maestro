@@ -16,6 +16,11 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+# backend="qoro": run circuits on the QoroService cloud through Divi
+# (0.16 adds QoroService.submit_vjp, used for adjoint gradients).
+cloud = ["qoro-divi[pennylane]>=0.16; python_version >= '3.11'"]
+
 [project.urls]
 Homepage = "https://github.com/QoroQuantum/pennylane-maestro"
 Repository = "https://github.com/QoroQuantum/pennylane-maestro"
