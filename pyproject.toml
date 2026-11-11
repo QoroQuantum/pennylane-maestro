@@ -17,8 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# backend="qoro": run circuits on the QoroService cloud through Divi. Divi
-# 0.16 adds QoroService.submit_vjp and allows qoro-maestro >= 0.3.8.
+# backend="qoro": run circuits on the QoroService cloud through Divi
+# (0.16 adds QoroService.submit_vjp, used for adjoint gradients).
 cloud = ["qoro-divi[pennylane]>=0.16; python_version >= '3.11'"]
 
 [project.urls]
@@ -34,11 +34,6 @@ include = ["pennylane_maestro*"]
 
 [tool.setuptools.package-data]
 pennylane_maestro = ["config.toml"]
-
-[tool.uv]
-# Until Divi 0.16 is released, lock the [cloud] extra against its nightly
-# builds (uv only; the published requirement stays >=0.16). Remove then.
-override-dependencies = ["qoro-divi[pennylane]>=0.16.0.dev0; python_version >= '3.11'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

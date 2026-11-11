@@ -523,7 +523,7 @@ class MaestroQubitDevice(Device):
         backend (str or divi.backends.CircuitRunner): Where circuits run:
 
             - ``"local"`` (default) — the Maestro engine in this process
-            - ``"qoro"`` — the QoroService cloud through Divi. The API key
+            - ``"qoro"`` — the Qoro cloud through Divi. The API key
               comes from ``QORO_API_KEY`` (environment or ``.env`` file) and
               the job target from the defaults saved by
               ``divi-config-helper``; the Maestro options above that differ
@@ -567,7 +567,7 @@ class MaestroQubitDevice(Device):
         # Reproducible random sampling with seed
         dev = qml.device("maestro.qubit", wires=5, shots=1000, seed=42)
 
-        # The QoroService cloud through Divi
+        # The Qoro cloud through Divi
         dev = qml.device("maestro.qubit", wires=20, backend="qoro")
     """
 

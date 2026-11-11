@@ -1,4 +1,4 @@
-"""Run tapes through Divi on a remote backend such as the QoroService cloud.
+"""Run tapes through Divi on a remote backend such as the Qoro cloud.
 
 With ``backend="qoro"`` (or a Divi ``CircuitRunner``) the device hands each
 batch of tapes to Divi instead of the local Maestro engine:
@@ -17,7 +17,7 @@ batch of tapes to Divi instead of the local Maestro engine:
 
 Circuits reach Divi as PennyLane tapes (``divi.circuits.qscript_to_meta``)
 and leave as OpenQASM 2. Wire ``i`` of a tape mapped to standard wires is
-qubit ``q[i]``. Divi Pauli terms put qubit 0 first; Divi counts put it last.
+qubit ``q[i]``. Divi Pauli terms and counts keys both put qubit 0 first.
 
 Divi is imported lazily, so the local device does not need it.
 """
@@ -168,7 +168,7 @@ def resolve_backend(backend, simulator_config, explicit=None):
     """The Divi runner for the device's ``backend`` setting.
 
     ``"qoro"`` builds a ``QoroService`` (API key from ``QORO_API_KEY`` or a
-    ``.env`` file; with Divi 0.16+ also the defaults saved by
+    ``.env`` file; target and options from the defaults saved by
     ``divi-config-helper``) and layers the device's Maestro options over its
     Maestro defaults. A ``CircuitRunner`` instance is used as it is. Maestro
     options that cannot apply (a runner passed in, a QPU target) warn.
@@ -290,13 +290,13 @@ def _shot_groups(shots: Sequence[int]) -> list[list[int]]:
 
 
 def _counts_to_samples(counts: Mapping[str, int], num_wires: int) -> np.ndarray:
-    """``(shots, num_wires)`` samples from Divi counts, whose keys put qubit 0
-    last; column ``i`` of the result is wire ``i``."""
+    """``(shots, num_wires)`` samples from Divi counts, whose keys put c[0]
+    (qubit 0) first; column ``i`` of the result is wire ``i``."""
     keys = list(counts)
     if not keys:
         return np.zeros((0, num_wires), dtype=np.int64)
     rows = np.array(
-        [[int(b) for b in key[::-1].ljust(num_wires, "0")[:num_wires]] for key in keys],
+        [[int(b) for b in key.ljust(num_wires, "0")[:num_wires]] for key in keys],
         dtype=np.int64,
     )
     return np.repeat(rows, [int(counts[key]) for key in keys], axis=0)

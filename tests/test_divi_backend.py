@@ -2,13 +2,12 @@
 
 Divi's local ``MaestroSimulator`` stands in for the cloud: it implements the
 same ``CircuitRunner`` contract as ``QoroService`` (expectation-value jobs,
-little-endian counts, ``submit_vjp``). ``TestQoroService`` drives the real
+counts keyed with c[0] first, ``submit_vjp``). ``TestQoroService`` drives the real
 ``QoroService`` client offline through a fake HTTP transport.
 """
 
 import base64
 import gzip
-import inspect
 import itertools
 import re
 import subprocess
@@ -26,7 +25,6 @@ from pennylane.tape import QuantumScript
 divi = pytest.importorskip("divi", reason="Divi backends need qoro-divi")
 
 from divi.backends import (  # noqa: E402
-    CircuitRunner,
     JobConfig,
     MaestroConfig,
     MaestroSimulator,
@@ -35,13 +33,7 @@ from divi.backends import (  # noqa: E402
     SimulatorCluster,
 )
 
-from pennylane_maestro import adjoint as _adjoint  # noqa: E402
 from pennylane_maestro import divi_backend  # noqa: E402
-
-needs_vjp = pytest.mark.skipif(
-    not (_adjoint.HAS_ENGINE_ADJOINT and hasattr(CircuitRunner, "submit_vjp")),
-    reason="Divi adjoint differentiation needs Divi's submit_vjp and maestro.AdjointProgram",
-)
 
 H = 0.5 * qml.Z(0) @ qml.X(1) - 0.3 * qml.Y(2) + 0.2 * qml.I(0)
 
@@ -584,7 +576,6 @@ def _jacobian(qnode, x):
     return qml.jacobian(lambda v: qml.math.stack(qnode(v)))(x)
 
 
-@needs_vjp
 class TestDerivatives:
     @pytest.mark.parametrize("device_vjp", [False, True])
     def test_adjoint_matches_backprop(self, runner, device_vjp, tol):
@@ -797,12 +788,9 @@ class FakeQoroCloud:
                 continue
             # Parametric payloads only come from submit_vjp, which plays the
             # service's adjoint sweep with Divi's own (private) helpers.
-            from divi.backends.runners._maestro import (
-                _bind_parameters,
-                _compile_adjoint_programs,
-                _vjp_inputs,
-            )
+            from divi.backends.runners._maestro import _compile_adjoint_programs, _vjp_inputs
             from divi.circuits import CircuitPayload, build_template
+            from divi.circuits._qasm_template import bind_template
             from qiskit.circuit import Parameter
 
             template = _gunzip(fragment["circuit_template"])
@@ -826,20 +814,19 @@ class FakeQoroCloud:
                         }
                     )
                 else:
-                    qasm = _bind_parameters(build_template(template, names), row["values"])
+                    qasm = bind_template(build_template(template, names), row["values"])
                     result = self.sim.submit_circuits({row["label"]: qasm}, ham_ops=";".join(terms))
                     out.append({"label": row["label"], "results": result.results[0]["results"]})
         return out
 
 
 def _offline_service(cloud, **kwargs):
-    if "use_saved_defaults" in inspect.signature(QoroService).parameters:
-        kwargs["use_saved_defaults"] = False  # ignore any divi-config-helper defaults
     with mock.patch.object(QoroService, "_make_request", autospec=True, side_effect=cloud):
         service = QoroService(
             auth_token="offline",
             polling_interval=0.0,
             max_retries=5,
+            use_saved_defaults=False,  # ignore any divi-config-helper defaults
             **kwargs,
         )
     service._make_request = lambda method, endpoint, **kw: cloud(service, method, endpoint, **kw)
@@ -920,7 +907,6 @@ class TestQoroService:
         assert job["init"]["job_type"] == "EXECUTE"
         assert job["fragments"][0]["shot_groups"] == [[0, 1, 50]]
 
-    @needs_vjp
     def test_adjoint_through_the_service(self, cloud, tol):
         service = _offline_service(cloud)
         got = _jacobian(_cost(_device(service), diff_method="adjoint"), X0)

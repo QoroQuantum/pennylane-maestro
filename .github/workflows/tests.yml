@@ -49,12 +49,9 @@ jobs:
       uses: astral-sh/setup-uv@v4
 
     - name: Install dependencies
-      # The [cloud] extra needs Divi 0.16; until it is released, test against
-      # its nightly pre-releases (then: uv pip install --system -e ".[cloud]").
       run: |
         uv pip install --system pytest
-        uv pip install --system -e .
-        uv pip install --system --prerelease=allow "qoro-divi[pennylane]>=0.16.0.dev0"
+        uv pip install --system -e ".[cloud]"
 
     - name: Run Divi backend tests
       run: |
