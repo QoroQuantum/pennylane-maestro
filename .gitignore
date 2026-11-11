@@ -29,4 +29,8 @@ coverage.xml
 Thumbs.db
 .env
 
-examples/*
+# Files the examples write
+examples/**/*.png
+examples/**/*.npz
+/ising_quench_dynamics.png
+/trotter_time_evolution.png

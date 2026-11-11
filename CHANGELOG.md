@@ -8,7 +8,7 @@ releases may contain breaking changes).
 ## [Unreleased]
 
 ### Added
-- `backend` option: `"qoro"` runs circuits on the QoroService cloud through
+- `backend` option: `"qoro"` runs circuits on the Qoro cloud through
   Divi, and any Divi `CircuitRunner` (a configured `QoroService`,
   `MaestroSimulator`, ...) can be passed instead. Each batch of tapes becomes
   at most one expectation-value job and one counts job. Adjoint derivatives
@@ -16,11 +16,23 @@ releases may contain breaking changes).
   jobs on CPU statevector targets; `"best"` falls back to parameter-shift
   otherwise. Install with `pip install "pennylane-maestro[cloud]"` (Divi 0.16+,
   Python 3.11+).
+- Examples: `qoro_cloud.py`, `hamiltonian_vqe.py`, `qaoa_maxcut.py` and
+  `quantum_classifier.py` (the last three take `--cloud`), with an index in
+  `examples/README.md`.
+- `docs/guide.md`, with the options, gradients, cloud, time-evolution and
+  benchmark details that used to be in the README. Benchmarks re-run on
+  PennyLane 0.45.1 and qoro-maestro 0.3.14.
 
 ### Changed
 - `simulator_type` and `simulation_type` default to `None`, which is
   `"QCSim"` / `"Statevector"` on the local engine as before, and lets a Divi
   backend choose.
+- `examples/ising_phase_transition.py` saves its figure without opening a
+  window, so it runs unattended.
+
+### Removed
+- `examples/ising_vqe_pipeline_demo.py`, which used Divi APIs that no longer
+  exist; `backend="qoro"` now covers its cloud stage.
 
 ## [0.6.0] - 2026-10-26
 
