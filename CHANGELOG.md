@@ -7,6 +7,28 @@ releases may contain breaking changes).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-12
+
+### Added
+- `simulator_type="Gpu"` with `backend="qoro"` runs the jobs on Qoro's GPU
+  cluster (`qoro_gpu`), as qiskit-maestro's `device="GPU"` does. Gradients
+  there use parameter-shift, since Maestro's adjoint method needs the CPU
+  statevector.
+
+### Changed
+- Releases follow qiskit-maestro's flow: publishing a GitHub release, or running
+  the Publish to PyPI workflow by hand (with a dry-run option), runs the tests,
+  builds and verifies the distributions with `scripts/verify_dist.py`, uploads
+  them to PyPI and makes sure the GitHub release exists. See `CONTRIBUTING.md`.
+- The version is set only in `pyproject.toml`; `pennylane_maestro.__version__`
+  reads it from the installed package.
+
+### Removed
+- `setup.py`, which repeated the metadata in `pyproject.toml`.
+
+### Fixed
+- The sdist includes the whole test suite; `tests/conftest.py` was missing.
+
 ## [0.7.0] - 2026-11-11
 
 ### Added
@@ -159,7 +181,8 @@ releases may contain breaking changes).
 ### Changed
 - Consecutive Pauli-expval snapshots are batched into a single estimate call.
 
-[Unreleased]: https://github.com/QoroQuantum/pennylane-maestro/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/QoroQuantum/pennylane-maestro/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/QoroQuantum/pennylane-maestro/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/QoroQuantum/pennylane-maestro/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/QoroQuantum/pennylane-maestro/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/QoroQuantum/pennylane-maestro/compare/v0.4.1...v0.5.0
