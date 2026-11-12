@@ -96,6 +96,10 @@ MAX_ANALYTIC_PROBABILITY_WIRES = 10
 #: Most Pauli terms of ``O**2`` an analytic ``qml.var(O)`` may need.
 MAX_VARIANCE_TERMS = 10_000
 
+#: The Qoro cluster ``backend="qoro"`` runs on with ``simulator_type="Gpu"``,
+#: as qiskit-maestro's ``device="GPU"`` does.
+GPU_CLUSTER = "qoro_gpu"
+
 #: Largest imaginary part tolerated in an observable's Pauli coefficients.
 _IMAGINARY_TOLERANCE = 1e-10
 
@@ -170,13 +174,18 @@ def resolve_backend(backend, simulator_config, explicit=None):
     ``"qoro"`` builds a ``QoroService`` (API key from ``QORO_API_KEY`` or a
     ``.env`` file; target and options from the defaults saved by
     ``divi-config-helper``) and layers the device's Maestro options over its
-    Maestro defaults. A ``CircuitRunner`` instance is used as it is. Maestro
-    options that cannot apply (a runner passed in, a QPU target) warn.
+    Maestro defaults. With ``simulator_type="Gpu"`` its jobs go to the Qoro
+    GPU cluster, :data:`GPU_CLUSTER`, whatever the saved target. A
+    ``CircuitRunner`` instance is used as it is. Maestro options that cannot
+    apply (a runner passed in, a QPU target) warn.
     """
     divi = import_divi()
     options = maestro_options(simulator_config, explicit)
     if isinstance(backend, str):
         service = divi.backends.QoroService()
+        if getattr(options.get("simulator_type"), "name", None) == "Gpu":
+            # Setting the cluster clears a saved QPU target.
+            service.job_config = service.job_config.override(simulator_cluster=GPU_CLUSTER)
         if options:
             if getattr(service.job_config, "qpu_system", None) is not None:
                 _warn_unused(options, f"the QPU target {service.job_config.qpu_system.name!r}")

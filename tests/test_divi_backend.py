@@ -15,6 +15,7 @@ import sys
 import warnings
 from unittest import mock
 
+import maestro
 import numpy as np
 import pennylane as qml
 import pytest
@@ -746,7 +747,12 @@ class FakeQoroCloud:
         if endpoint == "qpusystem/":
             return mock.Mock(json=lambda: [])
         if endpoint == "simulatorcluster/":
-            return mock.Mock(json=lambda: [{"name": "qoro_maestro", "supports_expval": True}])
+            return mock.Mock(
+                json=lambda: [
+                    {"name": "qoro_maestro", "supports_expval": True},
+                    {"name": "qoro_gpu", "supports_expval": True},
+                ]
+            )
         if endpoint == "job/init/":
             job_id = f"job-{next(self.ids)}"
             self.jobs[job_id] = {"init": body, "fragments": []}
@@ -877,6 +883,45 @@ class TestQoroService:
         with pytest.warns(UserWarning, match="QPU target 'fake_qpu'"):
             dev = qml.device("maestro.qubit", wires=2, backend="qoro", seed=3)
         assert dev.backend.maestro_config is None
+
+    def test_gpu_runs_on_the_gpu_cluster(self, cloud, monkeypatch, tol):
+        monkeypatch.setattr(divi.backends, "QoroService", lambda: _offline_service(cloud))
+        dev = qml.device("maestro.qubit", wires=2, backend="qoro", simulator_type="Gpu")
+        assert dev.backend.job_config.simulator_cluster.name == divi_backend.GPU_CLUSTER == "qoro_gpu"
+
+        @qml.qnode(dev)
+        def circuit(x):
+            qml.RX(x, 0)
+            qml.CNOT([0, 1])
+            return qml.expval(qml.Z(1))
+
+        x = pnp.array(0.4, requires_grad=True)
+        assert np.isclose(circuit(x), np.cos(0.4), **tol)
+        # Maestro's adjoint needs the CPU statevector: on the GPU, parameter-shift.
+        assert np.isclose(qml.grad(circuit)(x), -np.sin(0.4), **tol)
+        jobs = list(cloud.jobs.values())
+        assert {job["init"]["simulator_cluster"] for job in jobs} == {"qoro_gpu"}
+        assert all(job["init"]["maestro_config"]["simulator_type"] == int(maestro.SimulatorType.Gpu) for job in jobs)
+        assert not any("parameter_sets" in fragment for job in jobs for fragment in job["fragments"])
+
+    def test_gpu_replaces_a_saved_qpu_target(self, cloud, monkeypatch):
+        qpu = JobConfig(qpu_system=QPUSystem(name="fake_qpu"))
+        monkeypatch.setattr(
+            divi.backends, "QoroService", lambda: _offline_service(cloud, job_config=qpu)
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            dev = qml.device("maestro.qubit", wires=2, backend="qoro", simulator_type="Gpu")
+        assert not [w for w in caught if "do not apply" in str(w.message)]
+        assert dev.backend.job_config.qpu_system is None
+        assert dev.backend.job_config.simulator_cluster.name == "qoro_gpu"
+        assert dev.backend.maestro_config.simulator_type == maestro.SimulatorType.Gpu
+
+    def test_a_passed_service_keeps_its_target(self, cloud):
+        service = _offline_service(cloud)
+        with pytest.warns(UserWarning, match="do not apply"):
+            dev = qml.device("maestro.qubit", wires=2, backend=service, simulator_type="Gpu")
+        assert dev.backend.job_config.simulator_cluster.name == "qoro_maestro"
 
     def test_results_match_default_qubit(self, cloud, tol):
         service = _offline_service(
