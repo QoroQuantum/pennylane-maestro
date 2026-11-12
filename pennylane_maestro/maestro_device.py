@@ -529,7 +529,9 @@ class MaestroQubitDevice(Device):
               ``divi-config-helper``; the Maestro options above that differ
               from Maestro's defaults (and ``simulator_type`` /
               ``simulation_type`` whenever given) are layered over the saved
-              ones, on simulator targets
+              ones, on simulator targets. ``simulator_type="Gpu"`` runs the
+              jobs on the Qoro GPU cluster (``qoro_gpu``) instead of the
+              saved target
             - a Divi ``CircuitRunner`` such as a configured
               ``divi.backends.QoroService`` — used as it is, with its own
               ``maestro_config``

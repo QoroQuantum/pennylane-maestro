@@ -118,6 +118,14 @@ dev = qp.device("maestro.qubit", wires=20, backend="qoro",
 
 The job target (a simulator cluster or a QPU system) comes from the defaults saved with `divi-config-helper`, or is the `qoro_maestro` simulator if none are saved. Device options that differ from Maestro's defaults (`max_bond_dimension`, `seed`, ...), and `simulator_type`/`simulation_type` when given, are layered over the saved Maestro defaults; options left unset are the service's choice. They apply to simulator targets only: with a QPU target the device warns and leaves them out.
 
+`simulator_type="Gpu"` sends the jobs to Qoro's GPU cluster, `qoro_gpu`, whatever the saved target, so no GPU of your own is needed:
+
+```python
+dev = qp.device("maestro.qubit", wires=30, backend="qoro", simulator_type="Gpu")
+```
+
+Maestro's adjoint method needs the CPU statevector, so on the GPU cluster `diff_method="best"` uses parameter-shift: two jobs per optimizer step, one for the circuit and one for all its shifted copies.
+
 For full control, pass a configured Divi backend instead; its own `maestro_config` applies:
 
 ```python
@@ -180,7 +188,7 @@ res = dev.incremental_evolve(
 
 ## GPU
 
-`simulator_type="Gpu"` runs on Maestro's CUDA backend (statevector, MPS and tensor network, via NVIDIA cuQuantum). You need GPU access: see [Get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html).
+`simulator_type="Gpu"` runs on Maestro's CUDA backend (statevector, MPS and tensor network, via NVIDIA cuQuantum). You need GPU access: see [Get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html). With `backend="qoro"`, the same option runs on Qoro's GPU cluster instead, with no GPU or licence of your own: see [Qoro cloud](#target-and-options).
 
 ```python
 dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu", precision="double")

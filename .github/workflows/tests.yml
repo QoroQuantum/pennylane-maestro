@@ -2,9 +2,20 @@ name: Tests
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:  # "Run workflow" in the Actions tab.
+  workflow_call:  # Run by publish.yml before it uploads.
+
+permissions:
+  contents: read
+
+# A new push to a branch cancels the run still going for the one before. Runs on
+# main always finish.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -14,45 +25,66 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+      - uses: actions/checkout@v7
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v4
-        
-    - name: Install dependencies
-      run: |
-        uv pip install --system pytest pytest-cov
-        uv pip install --system -e .
-        
-    - name: Run tests
-      run: |
-        pytest tests/ -v --cov=pennylane_maestro --cov-report=xml
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: |
+          uv pip install --system pytest pytest-cov
+          uv pip install --system -e .
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v --cov=pennylane_maestro --cov-report=xml
 
   test-qoro:
     # backend="qoro" / Divi runners; Divi needs Python 3.11+.
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-    - name: Set up Python 3.12
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
-    - name: Install dependencies
-      run: |
-        uv pip install --system pytest
-        uv pip install --system -e ".[cloud]"
+      - name: Install dependencies
+        run: |
+          uv pip install --system pytest
+          uv pip install --system -e ".[cloud]"
 
-    - name: Run Divi backend tests
-      run: |
-        pytest tests/test_divi_backend.py -v
+      - name: Run Divi backend tests
+        run: |
+          pytest tests/test_divi_backend.py -v
+
+  dist:
+    # What publish.yml builds and checks, on every change.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Verify the sdist and wheel
+        # The sdist must hold the whole test suite and collect it when extracted. The
+        # wheel must install into a fresh environment and import from outside the checkout.
+        run: python scripts/verify_dist.py dist/ --run-tests

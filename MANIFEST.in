@@ -1,1 +1,4 @@
 include pennylane_maestro/config.toml
+# setuptools adds only tests/test_*.py by default; the suite also needs conftest.py.
+graft tests
+global-exclude __pycache__ *.py[cod]
