@@ -1,0 +1,63 @@
+name: Docs
+
+# Builds the documentation on every pull request into main and every push to it,
+# failing on any Sphinx warning, such as a broken link to another page or a page
+# left out of the contents. Pushes to main also publish it to GitHub Pages, at
+# https://qoroquantum.github.io/pennylane-maestro/.
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:  # "Run workflow" in the Actions tab; publishes when run on main.
+
+permissions:
+  contents: read
+
+# A new push to a branch cancels the build still going for the one before.
+# Builds of main always finish.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - uses: astral-sh/setup-uv@v7
+
+      - name: Install
+        run: uv pip install --system -e ".[docs]"
+
+      - name: Build
+        run: python -m sphinx -W --keep-going -b html docs docs/_build/html
+
+      - name: Upload for GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/_build/html
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

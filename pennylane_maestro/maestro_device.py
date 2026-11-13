@@ -542,35 +542,35 @@ class MaestroQubitDevice(Device):
             ``"best"``) of analytic Pauli/Hamiltonian expectation values run
             as one ``submit_vjp`` job per register width when the backend
             differentiates on the CPU statevector; otherwise parameter-shift
-            is used. ``qml.state()`` and other state-based measurements are
+            is used. ``qp.state()`` and other state-based measurements are
             not available, nor is :meth:`incremental_evolve`.
 
     Usage examples::
 
         # CPU statevector (default)
-        dev = qml.device("maestro.qubit", wires=20)
+        dev = qp.device("maestro.qubit", wires=20)
 
         # GPU statevector
-        dev = qml.device("maestro.qubit", wires=20, simulator_type="Gpu")
+        dev = qp.device("maestro.qubit", wires=20, simulator_type="Gpu")
 
         # GPU with double precision
-        dev = qml.device("maestro.qubit", wires=20,
-                         simulator_type="Gpu", precision="double")
+        dev = qp.device("maestro.qubit", wires=20,
+                        simulator_type="Gpu", precision="double")
 
         # MPS for large qubit counts
-        dev = qml.device("maestro.qubit", wires=100,
-                         simulation_type="MatrixProductState",
-                         max_bond_dimension=256)
+        dev = qp.device("maestro.qubit", wires=100,
+                        simulation_type="MatrixProductState",
+                        max_bond_dimension=256)
 
         # Stabilizer for Clifford circuits
-        dev = qml.device("maestro.qubit", wires=1000,
-                         simulation_type="Stabilizer")
+        dev = qp.device("maestro.qubit", wires=1000,
+                        simulation_type="Stabilizer")
 
         # Reproducible random sampling with seed
-        dev = qml.device("maestro.qubit", wires=5, shots=1000, seed=42)
+        dev = qp.device("maestro.qubit", wires=5, shots=1000, seed=42)
 
         # The Qoro cloud through Divi
-        dev = qml.device("maestro.qubit", wires=20, backend="qoro")
+        dev = qp.device("maestro.qubit", wires=20, backend="qoro")
     """
 
     name = "maestro.qubit"
@@ -1801,7 +1801,7 @@ class MaestroQubitDevice(Device):
             observables (list[Operator] or list[str]): Observables to evaluate.
 
         Returns:
-            dict: with keys:
+            dict: The expectation values and timings, with keys:
                 - ``"expectation_values"``: NumPy array of shape ``(len(measure_at_steps), len(observables))``
                 - ``"steps"``: list of measured step indices
                 - ``"time_taken"``: total elapsed seconds

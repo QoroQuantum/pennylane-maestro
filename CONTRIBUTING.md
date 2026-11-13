@@ -25,6 +25,32 @@ The Tests workflow runs on every pull request into `main` and every push to it:
 
 To run it by hand, use "Run workflow" on the Tests workflow in the Actions tab.
 
+The Docs workflow builds the documentation on the same events, failing on any
+Sphinx warning, and publishes it to GitHub Pages from `main`.
+
+## Building the docs
+
+The documentation in `docs/` is a Sphinx site with the
+[Furo](https://pradyunsg.me/furo/) theme in Qoro's colours, as the Maestro docs
+are, published at
+[qoroquantum.github.io/pennylane-maestro](https://qoroquantum.github.io/pennylane-maestro/).
+To build it:
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -W --keep-going -b html docs docs/_build/html
+```
+
+Then open `docs/_build/html/index.html`. Some pages come from files outside
+`docs/`, so each is edited in one place:
+
+- the home page shows `README.md` between its `start-docs` and `end-docs`
+  markers, and the Changelog page shows `CHANGELOG.md`;
+- the example pages show the scripts in `examples/`; a new script needs its own
+  page in `docs/examples/` and a row in `docs/examples/index.md`;
+- the API reference, `docs/api.rst`, takes the docstrings, but lists the
+  members it shows, so add new public methods there.
+
 ## Making a change
 
 Add a line to [CHANGELOG.md](CHANGELOG.md) under "Unreleased".

@@ -4,6 +4,9 @@
 [![Tests](https://github.com/QoroQuantum/pennylane-maestro/actions/workflows/tests.yml/badge.svg)](https://github.com/QoroQuantum/pennylane-maestro/actions/workflows/tests.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/QoroQuantum/pennylane-maestro/blob/main/LICENSE)
 
+<!-- The documentation's home page (docs/index.md) shows the README from here to "end-docs". -->
+<!-- start-docs -->
+
 Run your PennyLane code on the [Maestro](https://github.com/QoroQuantum/maestro)
 quantum simulator, on your machine or in the Qoro cloud, by changing the device name.
 
@@ -13,7 +16,7 @@ quantum simulator, on your machine or in the Qoro cloud, by changing the device 
   with shot sampling, plus stabilizer, tensor network and Pauli propagation.
 - **Fast**: 5–6× faster than `lightning.qubit` on 20–26-qubit statevector
   circuits, and 10–18× faster than `default.tensor` on MPS circuits up to
-  1,000 qubits ([benchmarks](https://github.com/QoroQuantum/pennylane-maestro/blob/main/docs/guide.md#performance)).
+  1,000 qubits ([benchmarks](https://qoroquantum.github.io/pennylane-maestro/guide.html#performance)).
 - **CPU, GPU or cloud**: run locally, on your own GPU, or on Qoro's CPUs and
   GPUs in the cloud with no hardware of your own.
 
@@ -66,7 +69,7 @@ the job. Add `simulator_type="Gpu"` to run on Qoro's GPU cluster.
 [examples/qoro_cloud.py](https://github.com/QoroQuantum/pennylane-maestro/blob/main/examples/qoro_cloud.py)
 trains a circuit and samples a 50-qubit state in the cloud. A few features, such
 as `qp.state()`, run locally only for now: see the
-[guide](https://github.com/QoroQuantum/pennylane-maestro/blob/main/docs/guide.md#qoro-cloud).
+[guide](https://qoroquantum.github.io/pennylane-maestro/guide.html#qoro-cloud).
 
 ## Pick a simulation method
 
@@ -84,19 +87,25 @@ dev = qp.device("maestro.qubit", wires=100,
 
 Add `simulator_type="Gpu"` for your own GPU
 ([get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html)).
-The [guide](https://github.com/QoroQuantum/pennylane-maestro/blob/main/docs/guide.md#options)
+The [guide](https://qoroquantum.github.io/pennylane-maestro/guide.html#options)
 lists every method and option.
+
+<!-- end-docs -->
 
 ## Learn more
 
-- [Guide](https://github.com/QoroQuantum/pennylane-maestro/blob/main/docs/guide.md):
-  every option, gradients, the cloud in detail, time evolution with
-  `qp.Snapshot`, what's supported, and benchmarks.
-- [Examples](https://github.com/QoroQuantum/pennylane-maestro/tree/main/examples):
-  the cloud, VQE, QAOA, a data re-uploading classifier, a 100-qubit Ising
-  quench with MPS sampling, Trotter time evolution, and the benchmark suite.
+- [Documentation](https://qoroquantum.github.io/pennylane-maestro/):
+  - [Guide](https://qoroquantum.github.io/pennylane-maestro/guide.html): every
+    option, gradients, the cloud in detail, time evolution with `qp.Snapshot`,
+    what's supported, and benchmarks.
+  - [Examples](https://qoroquantum.github.io/pennylane-maestro/examples/): the
+    cloud, VQE, QAOA, a data re-uploading classifier, a 100-qubit Ising quench
+    with MPS sampling, Trotter time evolution, and the benchmark suite.
+  - [API reference](https://qoroquantum.github.io/pennylane-maestro/api.html).
 - [Maestro docs](https://qoroquantum.github.io/maestro/).
 - [Changelog](https://github.com/QoroQuantum/pennylane-maestro/blob/main/CHANGELOG.md).
+- [Contributing](https://github.com/QoroQuantum/pennylane-maestro/blob/main/CONTRIBUTING.md):
+  running the tests and building the docs.
 
 ## Citation
 

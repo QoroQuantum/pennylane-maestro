@@ -6,7 +6,10 @@ from pennylane_maestro.maestro_device import MaestroQubitDevice
 
 
 def incremental_evolve(dev, init, trotter_step, measure_at_steps, observables):
-    """Convenience wrapper for ``dev.incremental_evolve(...)``."""
+    """Same as ``dev.incremental_evolve(init, trotter_step, measure_at_steps, observables)``.
+
+    See :meth:`MaestroQubitDevice.incremental_evolve` for the arguments and result.
+    """
     return dev.incremental_evolve(init, trotter_step, measure_at_steps, observables)
 
 

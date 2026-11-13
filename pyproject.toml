@@ -32,9 +32,17 @@ dependencies = [
 # backend="qoro": run circuits on the Qoro cloud through Divi
 # (0.16 adds QoroService.submit_vjp, used for adjoint gradients).
 cloud = ["qoro-divi[pennylane]>=0.16; python_version >= '3.11'"]
+# Builds the documentation in docs/.
+docs = [
+    "sphinx>=8",
+    "furo>=2024.8",
+    "myst-parser>=4",
+    "sphinx-copybutton>=0.5",
+]
 
 [project.urls]
 Homepage = "https://github.com/QoroQuantum/pennylane-maestro"
+Documentation = "https://qoroquantum.github.io/pennylane-maestro/"
 Repository = "https://github.com/QoroQuantum/pennylane-maestro"
 Issues = "https://github.com/QoroQuantum/pennylane-maestro/issues"
 

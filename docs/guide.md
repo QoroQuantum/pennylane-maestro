@@ -1,14 +1,9 @@
-# pennylane-maestro guide
+# Guide
 
-Everything the [README](../README.md) leaves out:
-
-- [Options](#options)
-- [Gradients](#gradients)
-- [Qoro cloud](#qoro-cloud)
-- [Time evolution](#time-evolution)
-- [GPU](#gpu)
-- [What's supported](#whats-supported)
-- [Performance](#performance)
+Every option, gradients, the Qoro cloud in detail, time evolution with
+`qp.Snapshot`, the GPU, what's supported, and benchmarks. Runnable scripts are
+in [Examples](examples/index.md), and the device and its methods are in the
+[API reference](api.rst).
 
 All examples use `import pennylane as qp`.
 
@@ -205,7 +200,7 @@ dev = qp.device("maestro.qubit", wires=28, simulator_type="Gpu", precision="doub
 
 ## Performance
 
-Measured with [`examples/benchmark_lightning_vs_maestro.py`](../examples/benchmark_lightning_vs_maestro.py) on an Apple M4 Pro (8 performance and 4 efficiency cores, 48 GB) with macOS 26.6, Python 3.12, PennyLane 0.45.1, pennylane-lightning 0.45.0, quimb 1.15.0 and qoro-maestro 0.3.14, default thread settings. Each time is the mean of 3 runs after a warm-up; DNF means the warm-up and the runs took over 60 s.
+Measured with [`examples/benchmark_lightning_vs_maestro.py`](examples/benchmark_lightning_vs_maestro.md) on an Apple M4 Pro (8 performance and 4 efficiency cores, 48 GB) with macOS 26.6, Python 3.12, PennyLane 0.45.1, pennylane-lightning 0.45.0, quimb 1.15.0 and qoro-maestro 0.3.14, default thread settings. Each time is the mean of 3 runs after a warm-up; DNF means the warm-up and the runs took over 60 s.
 
 ### Statevector
 

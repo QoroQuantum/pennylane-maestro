@@ -29,6 +29,9 @@ coverage.xml
 Thumbs.db
 .env
 
+# Sphinx output
+docs/_build/
+
 # Files the examples write
 examples/**/*.png
 examples/**/*.npz
