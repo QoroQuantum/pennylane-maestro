@@ -15,7 +15,7 @@ to set up an API key.
 | [A data re-uploading classifier](quantum_classifier.md) | A classifier trained on a broadcast batch in one engine call (`--cloud`) |
 | [A 100-qubit Ising quench](ising_phase_transition.md) | A quench with MPS shot sampling (needs `matplotlib`, `scipy`) |
 | [Trotter time evolution](trotter_time_evolution.md) | Persistent-state Trotter evolution with `qp.Snapshot` and `incremental_evolve` |
-| [Benchmarks](benchmark_lightning_vs_maestro.md) | The benchmark suite behind the [performance tables](../guide.md#performance) (needs `pennylane-lightning`, `quimb`) |
+| [Benchmarks](benchmark_lightning_vs_maestro.md) | The benchmark suite behind the [performance tables](../guide/performance.md) (needs `pennylane-lightning`, `quimb`) |
 
 ```{toctree}
 :hidden:

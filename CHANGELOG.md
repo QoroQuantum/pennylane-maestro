@@ -10,9 +10,9 @@ releases may contain breaking changes).
 ### Added
 - A documentation site, at
   [qoroquantum.github.io/pennylane-maestro](https://qoroquantum.github.io/pennylane-maestro/),
-  built with Sphinx: the README's overview, the guide, the example scripts, an
-  API reference from the docstrings, and this changelog. The Docs workflow
-  builds it on every pull request, failing on any Sphinx warning, and publishes
+  built with Sphinx: the README's overview, the guide (one page per topic), the
+  example scripts, an API reference from the docstrings, and this changelog. The
+  Docs workflow builds it on every pull request, failing on any Sphinx warning, and publishes
   it from `main`. `pip install -e ".[docs]"` installs what the build needs, and
   the README and the PyPI Documentation link point at the site.
 

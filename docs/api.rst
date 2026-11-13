@@ -5,7 +5,7 @@ API reference
 
 Most code needs only the device name, ``qp.device("maestro.qubit", ...)``, which
 creates a :class:`MaestroQubitDevice`. Its keyword arguments are the options below;
-the :doc:`guide` explains them in more detail.
+the guide's :doc:`guide/options` page explains them in more detail.
 
 Device
 ------

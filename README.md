@@ -16,7 +16,7 @@ quantum simulator, on your machine or in the Qoro cloud, by changing the device 
   with shot sampling, plus stabilizer, tensor network and Pauli propagation.
 - **Fast**: 5–6× faster than `lightning.qubit` on 20–26-qubit statevector
   circuits, and 10–18× faster than `default.tensor` on MPS circuits up to
-  1,000 qubits ([benchmarks](https://qoroquantum.github.io/pennylane-maestro/guide.html#performance)).
+  1,000 qubits ([benchmarks](https://qoroquantum.github.io/pennylane-maestro/guide/performance.html)).
 - **CPU, GPU or cloud**: run locally, on your own GPU, or on Qoro's CPUs and
   GPUs in the cloud with no hardware of your own.
 
@@ -69,7 +69,7 @@ the job. Add `simulator_type="Gpu"` to run on Qoro's GPU cluster.
 [examples/qoro_cloud.py](https://github.com/QoroQuantum/pennylane-maestro/blob/main/examples/qoro_cloud.py)
 trains a circuit and samples a 50-qubit state in the cloud. A few features, such
 as `qp.state()`, run locally only for now: see the
-[guide](https://qoroquantum.github.io/pennylane-maestro/guide.html#qoro-cloud).
+[guide](https://qoroquantum.github.io/pennylane-maestro/guide/gpu_and_cloud.html#not-available-on-the-cloud-yet).
 
 ## Pick a simulation method
 
@@ -87,7 +87,7 @@ dev = qp.device("maestro.qubit", wires=100,
 
 Add `simulator_type="Gpu"` for your own GPU
 ([get GPU access](https://qoroquantum.github.io/maestro/getting-started/gpu-access.html)).
-The [guide](https://qoroquantum.github.io/pennylane-maestro/guide.html#options)
+The [guide](https://qoroquantum.github.io/pennylane-maestro/guide/options.html)
 lists every method and option.
 
 <!-- end-docs -->
