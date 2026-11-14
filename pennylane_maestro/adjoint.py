@@ -19,6 +19,7 @@ from collections import OrderedDict
 import numpy as np
 import pennylane as qml
 from pennylane.measurements import ExpectationMP, MidMeasureMP, ProbabilityMP
+from pennylane.operation import Channel
 from pennylane.ops import Snapshot
 from pennylane.ops.op_math import Adjoint, Conditional
 
@@ -217,7 +218,8 @@ def is_supported(tape, trainable=None, max_probability_wires=0):
     if tape.shots:
         return False
     for op in tape.operations:
-        if isinstance(op, (MidMeasureMP, Conditional, Snapshot)):
+        # The adjoint sweep runs a unitary circuit backwards: a noise channel has no inverse.
+        if isinstance(op, (MidMeasureMP, Conditional, Snapshot, Channel)):
             return False
     for mp in tape.measurements:
         if isinstance(mp, ProbabilityMP) and mp.obs is None and mp.mv is None:

@@ -3,6 +3,7 @@
 - **Gates**: Maestro's native gates (including `Rot` and `U3`) run directly; PennyLane decomposes the others (e.g. `IsingXX`) automatically.
 - **Measurements**: `expval`, `var`, `probs`, `sample`, `counts` and, locally, `state`, with analytic or finite shots and shot vectors.
 - **Mid-circuit measurements**: `qp.measure`, resets and `qp.cond`.
+- **Noise**: PennyLane's noise channels on one or two wires and `qp.add_noise` models, exact on the density matrix, the MPO and the Pauli propagator and sampled per shot on the statevector and the MPS. See [Noise](noise.md).
 - **Snapshots**: `qp.Snapshot`, with batched Pauli expectation estimation.
 - **Parameter broadcasting**: broadcast analytic Pauli expectation values and probabilities run as one batched engine call (with an `AdjointProgram`-enabled qoro-maestro); other broadcast circuits are split per batch element.
 - **Delay**: `qp.Delay` timing operations.

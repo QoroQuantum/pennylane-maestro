@@ -14,7 +14,15 @@ from pennylane.devices.modifiers import simulator_tracking, single_tape_support
 from pennylane.devices.preprocess import decompose as _decompose, validate_device_wires
 from pennylane.devices.qubit import measure as _qubit_measure
 from pennylane.exceptions import DeviceError
-from pennylane.measurements import ExpectationMP, MidMeasureMP, SampleMP
+from pennylane.measurements import (
+    ExpectationMP,
+    MidMeasureMP,
+    ProbabilityMP,
+    SampleMP,
+    StateMP,
+    VarianceMP,
+)
+from pennylane.operation import Channel
 from pennylane.ops import Snapshot
 from pennylane.ops.op_math import Adjoint, Conditional
 from pennylane.tape import QuantumScript, QuantumScriptOrBatch
@@ -40,6 +48,7 @@ from pennylane_maestro.converter import (
     _apply_operation,
     operations_to_maestro,
     extract_pauli_terms,
+    has_channels,
     _to_float,
 )
 
@@ -105,6 +114,71 @@ def _resolve_alias(value, legacy_value, name: str, legacy_name: str):
 # Observable clustering landed in Maestro 0.3.8; forward it
 # only when the installed SimulatorConfig exposes it.
 _SUPPORTS_OBSERVABLE_CLUSTERING = hasattr(SimulatorConfig(), "max_cluster_qubits")
+
+
+# How a backend takes a noise channel, as Maestro defines it: "exact" backends
+# hold the mixed state (or, for the Pauli propagator, apply the channel to the
+# observable); "sampled" ones apply one Kraus branch read from their state each
+# time the circuit runs, so only shots average to the channel.
+_CHANNEL_MODES = {
+    ("QCSim", "DensityMatrix"): "exact",
+    ("QCSim", "MatrixProductOperator"): "exact",
+    ("QCSim", "PauliPropagator"): "exact",
+    ("Gpu", "DensityMatrix"): "exact",
+    ("Gpu", "MatrixProductOperator"): "exact",
+    ("QiskitAer", "DensityMatrix"): "exact",
+    ("QCSim", "Statevector"): "sampled",
+    ("QCSim", "MatrixProductState"): "sampled",
+    ("QiskitAer", "Statevector"): "sampled",
+    ("QiskitAer", "MatrixProductState"): "sampled",
+    ("CompositeQCSim", "Statevector"): "sampled",
+    ("CompositeQiskitAer", "Statevector"): "sampled",
+}
+
+# Methods whose state has no statevector: analytic measurements other than
+# Pauli expectation values are assembled from Pauli expectation values there.
+_NO_STATEVECTOR_METHODS = ("DensityMatrix", "MatrixProductOperator", "PauliPropagator")
+
+# Most wires of an analytic qml.probs on those methods: 2**k Pauli-Z strings.
+_MAX_PAULI_PROBABILITY_WIRES = 16
+
+
+def _enum_name(value, enum_map) -> str:
+    """The name of a Maestro enum member."""
+    return next((name for name, member in enum_map.items() if member == value), str(value))
+
+
+def _pauli_sentence(obs):
+    """An observable as a sum of Pauli words, or ``None``."""
+    try:
+        sentence = qml.pauli.pauli_sentence(obs)
+    except (ValueError, TypeError, AttributeError):
+        try:
+            sentence = qml.pauli_decompose(
+                qml.matrix(obs), wire_order=list(obs.wires), pauli=True
+            )
+        except (ValueError, TypeError, AttributeError):
+            return None
+    return sentence
+
+
+def _probabilities_from_z(expectations) -> np.ndarray:
+    """Computational-basis probabilities of ``k`` wires from the expectation
+    values of every product of Z on them (a Walsh-Hadamard transform).
+
+    Entry ``m`` of ``expectations`` is ``<Z_S>`` for the subset ``S`` whose
+    wires are the set bits of ``m``, the first wire being the most significant
+    bit, as in the result."""
+    p = np.array(expectations, dtype=float)
+    size, half = len(p), 1
+    while half < size:
+        for start in range(0, size, 2 * half):
+            low = p[start:start + half].copy()
+            high = p[start + half:start + 2 * half].copy()
+            p[start:start + half] = low + high
+            p[start + half:start + 2 * half] = low - high
+        half *= 2
+    return np.maximum(p / size, 0.0)
 
 
 def _lsb_to_msb_statevector(state: np.ndarray, num_wires: int) -> np.ndarray:
@@ -369,6 +443,10 @@ def _maestro_stopping_condition(op: qml.operation.Operator) -> bool:
     """
     if isinstance(op, (MidMeasureMP, Conditional, Snapshot)):
         return True
+    # A noise channel goes to Maestro as it is; the converter refuses the ones
+    # Maestro cannot take (more than two wires, or a qoro-maestro without them).
+    if isinstance(op, Channel):
+        return True
     if op.name == "Delay":
         return True
     if isinstance(op, Adjoint):
@@ -386,6 +464,11 @@ def _divi_stopping_condition(op: qml.operation.Operator) -> bool:
     """
     if isinstance(op, Snapshot):
         return True
+    if isinstance(op, Channel):
+        raise DeviceError(
+            f"{op.name} is a noise channel: noise runs on the local Maestro engine "
+            "(backend='local'), not through a Divi backend."
+        )
     if op.name == "Identity":
         return len(op.wires) == 1
     return op.name in _divi.DIVI_GATES
@@ -442,6 +525,15 @@ _BACKENDS = ("local", "qoro")
 @single_tape_support
 class MaestroQubitDevice(Device):
     """PennyLane device for the Maestro quantum simulator by Qoro Quantum.
+
+    Noise: PennyLane's channel operations on one or two wires (and the ones
+    ``qml.add_noise`` inserts) run on the local engine, with a qoro-maestro
+    that has ``QuantumChannel``. ``"DensityMatrix"``,
+    ``"MatrixProductOperator"`` and ``"PauliPropagator"`` apply a channel
+    exactly. ``"Statevector"`` and ``"MatrixProductState"`` sample it, one
+    Kraus branch each time the circuit runs: a noisy circuit needs shots
+    there, and each shot is its own run. The other simulation types take no
+    channels.
 
     Args:
         wires (int or Iterable): Number of wires, or explicit wire labels.
@@ -746,6 +838,45 @@ class MaestroQubitDevice(Device):
         if self._seed is not None:
             cfg.seed = self._seed
         return cfg
+
+    # ------------------------------------------------------------------
+    # Noise channels
+    # ------------------------------------------------------------------
+
+    @property
+    def _method_name(self) -> str:
+        """The simulation type's name."""
+        return _enum_name(self._simulation_type, _SIMULATION_TYPE_MAP)
+
+    @property
+    def _channel_mode(self) -> str | None:
+        """How the backend takes a noise channel: ``"exact"``, ``"sampled"``
+        (one branch per shot) or ``None`` (not at all)."""
+        simulator = _enum_name(self._simulator_type, _SIMULATOR_TYPE_MAP)
+        return _CHANNEL_MODES.get((simulator, self._method_name))
+
+    def _samples_noise(self, tape: QuantumScript) -> bool:
+        """Whether the tape has noise channels this backend samples per shot."""
+        return self._channel_mode == "sampled" and has_channels(tape.operations)
+
+    def _check_noise(self, tape: QuantumScript) -> None:
+        """Refuse a noisy tape this backend cannot run as asked."""
+        mode = self._channel_mode
+        if mode is None:
+            raise DeviceError(
+                f"{self.name} takes no noise channels with simulation_type="
+                f"'{self._method_name}'. Use 'DensityMatrix' or "
+                "'MatrixProductOperator' for exact noise, or 'Statevector' or "
+                "'MatrixProductState' with shots, which sample it."
+            )
+        if mode == "sampled" and not tape.shots:
+            raise DeviceError(
+                f"simulation_type='{self._method_name}' samples noise channels from "
+                "its state, one branch each time the circuit runs, so a noisy "
+                "circuit has no analytic result there. Set shots, or use "
+                "simulation_type='DensityMatrix' (or 'MatrixProductOperator') for "
+                "exact values."
+            )
 
     # ------------------------------------------------------------------
     # Preprocessing
@@ -1166,6 +1297,9 @@ class MaestroQubitDevice(Device):
         tape = tape.map_to_standard_wires()
         num_wires = len(tape.wires) if len(tape.wires) > 0 else 1
 
+        if has_channels(tape.operations):
+            self._check_noise(tape)
+
         # ── Snapshot path: incremental circuit building ──
         has_snapshots = any(
             isinstance(op, Snapshot) for op in tape.operations
@@ -1238,6 +1372,10 @@ class MaestroQubitDevice(Device):
         if all_hamiltonian_expval:
             return self._execute_hamiltonian(tape, num_wires)
 
+        # ── A state without a statevector: Pauli expectation values ──
+        if self._method_name in _NO_STATEVECTOR_METHODS:
+            return self._execute_pauli_measurements(tape, num_wires)
+
         # ── Slow path: full statevector ──
         qc = tape_to_maestro(tape, num_wires)
         config = self._build_config()
@@ -1252,6 +1390,101 @@ class MaestroQubitDevice(Device):
         if len(tape.measurements) == 1:
             return results[0]
         return results
+
+    def _execute_pauli_measurements(self, tape: QuantumScript, num_wires: int) -> Result:
+        """Analytic measurements on a backend whose state has no statevector
+        (a density matrix, an MPO, the Pauli propagator).
+
+        Every measurement is assembled from Pauli expectation values, all of
+        them from one ``estimate()`` call: an expectation value or a variance
+        from the observable's Pauli terms (the variance also needs those of
+        its square), and ``qml.probs`` from the expectation values of every
+        product of Z on its wires.
+        """
+        method = self._method_name
+        strings: dict[str, int] = {}
+
+        def slot(chars) -> int | None:
+            """Index of a Pauli string among the ones to estimate; ``None`` for the identity."""
+            if all(c == "I" for c in chars):
+                return None
+            return strings.setdefault("".join(chars), len(strings))
+
+        def terms(sentence):
+            out = []
+            for pauli_word, coeff in sentence.items():
+                chars = ["I"] * num_wires
+                for wire, pauli in pauli_word.items():
+                    chars[int(wire)] = pauli
+                out.append((complex(coeff), slot(chars)))
+            return out
+
+        plans = []
+        for mp in tape.measurements:
+            if isinstance(mp, StateMP):
+                raise DeviceError(
+                    f"qml.state() is not available with simulation_type='{method}': "
+                    "its state has no statevector. Use expectation values, qml.var "
+                    "or qml.probs."
+                )
+            if isinstance(mp, ProbabilityMP) and mp.obs is None and getattr(mp, "mv", None) is None:
+                wires = [int(w) for w in (mp.wires if len(mp.wires) else tape.wires)]
+                if len(wires) > _MAX_PAULI_PROBABILITY_WIRES:
+                    raise DeviceError(
+                        f"Analytic qml.probs with simulation_type='{method}' takes at most "
+                        f"{_MAX_PAULI_PROBABILITY_WIRES} wires; got {len(wires)}. Use shots."
+                    )
+                slots = []
+                for mask in range(1 << len(wires)):
+                    chars = ["I"] * num_wires
+                    for position, wire in enumerate(wires):
+                        if (mask >> (len(wires) - 1 - position)) & 1:
+                            chars[wire] = "Z"
+                    slots.append(slot(chars))
+                plans.append(("probs", slots))
+                continue
+            if isinstance(mp, (ExpectationMP, VarianceMP)) and mp.obs is not None:
+                sentence = _pauli_sentence(mp.obs)
+                if sentence is None:
+                    raise DeviceError(
+                        f"{mp.obs.name} has no Pauli decomposition, which analytic "
+                        f"measurements with simulation_type='{method}' need."
+                    )
+                if isinstance(mp, VarianceMP):
+                    squared = sentence @ sentence
+                    squared.simplify()
+                    plans.append(("var", terms(sentence), terms(squared)))
+                else:
+                    plans.append(("expval", terms(sentence)))
+                continue
+            raise DeviceError(
+                f"{type(mp).__name__} is not available analytically with "
+                f"simulation_type='{method}'."
+            )
+
+        values = np.zeros(0)
+        if strings:
+            qc = tape_to_maestro(tape, num_wires)
+            raw = qc.estimate(list(strings), self._build_config())
+            values = np.asarray(raw["expectation_values"], dtype=float)
+
+        def value(index) -> float:
+            return 1.0 if index is None else values[index]
+
+        def total(pairs) -> float:
+            return float(np.real(sum(coeff * value(index) for coeff, index in pairs)))
+
+        results = []
+        for plan in plans:
+            if plan[0] == "probs":
+                results.append(_probabilities_from_z([value(index) for index in plan[1]]))
+            elif plan[0] == "var":
+                results.append(np.float64(max(total(plan[2]) - total(plan[1]) ** 2, 0.0)))
+            else:
+                results.append(np.float64(total(plan[1])))
+        if len(results) == 1:
+            return results[0]
+        return tuple(results)
 
     # ------------------------------------------------------------------
     # Finite-shots execution
@@ -1270,7 +1503,10 @@ class MaestroQubitDevice(Device):
         )
 
         if all_pauli_expval:
-            return self._execute_estimate(tape, num_wires)
+            # Noise that the backend samples has no exact value there: the
+            # estimate averages one trajectory of the channels per shot.
+            trajectories = shots if self._samples_noise(tape) else None
+            return self._execute_estimate(tape, num_wires, trajectories=trajectories)
 
         # General path: sample from counts
         qc = tape_to_maestro(tape, num_wires)
@@ -1393,9 +1629,13 @@ class MaestroQubitDevice(Device):
     # ------------------------------------------------------------------
 
     def _execute_estimate(
-        self, tape: QuantumScript, num_wires: int
+        self, tape: QuantumScript, num_wires: int, trajectories: int | None = None
     ) -> Result:
-        """Use Maestro's estimate() for pure-Pauli expval measurements."""
+        """Use Maestro's estimate() for pure-Pauli expval measurements.
+
+        With ``trajectories``, for noise channels that the backend samples
+        from its state, the values are the average over that many runs of
+        the circuit, each with its own branches of the channels."""
         qc = tape_to_maestro(tape, num_wires)
 
         pauli_strings = []
@@ -1405,7 +1645,16 @@ class MaestroQubitDevice(Device):
 
         config = self._build_config()
 
-        raw = qc.estimate(pauli_strings, config)
+        if trajectories:
+            raw = maestro.full_noise_estimate(
+                qc,
+                pauli_strings,
+                maestro.NoiseModel(),
+                noise_realizations=int(trajectories),
+                config=config,
+            )
+        else:
+            raw = qc.estimate(pauli_strings, config)
         exp_vals = raw["expectation_values"]
 
         # Handle SProd (scalar * Pauli) — multiply by the scalar

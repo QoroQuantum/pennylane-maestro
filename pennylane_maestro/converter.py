@@ -2,11 +2,17 @@
 
 from dataclasses import dataclass, field
 
+import maestro
 import numpy as np
 import pennylane as qml
+from pennylane.exceptions import DeviceError
 from pennylane.measurements import MidMeasureMP
+from pennylane.operation import Channel
 from pennylane.ops.op_math import Conditional
 from maestro.circuits import QuantumCircuit
+
+# Noise channels need a qoro-maestro with QuantumChannel (after 0.3.14).
+HAS_CHANNELS = hasattr(maestro, "QuantumChannel")
 
 # ---------------------------------------------------------------------------
 # Gate map: PennyLane operation name → (maestro method name, has_params)
@@ -61,6 +67,82 @@ def _to_float(p) -> float:
     return float(p)
 
 
+# ---------------------------------------------------------------------------
+# Noise channels
+# ---------------------------------------------------------------------------
+
+# PennyLane channels Maestro has in a structured form. A sampling backend
+# draws a structured relaxation without reading its state where it can, which
+# a bare list of Kraus operators does not allow.
+_STRUCTURED_CHANNELS = {
+    "AmplitudeDamping": lambda q, p: q.amplitude_damping(p[0]),
+    "GeneralizedAmplitudeDamping": lambda q, p: q.generalized_amplitude_damping(p[0], p[1]),
+    "PhaseDamping": lambda q, p: q.phase_damping(p[0]),
+    "DepolarizingChannel": lambda q, p: q.depolarizing(p[0]),
+    # ThermalRelaxationError(pe, t1, t2, tq)
+    "ThermalRelaxationError": lambda q, p: q.thermal_relaxation(p[3], p[1], p[2], p[0]),
+}
+
+# Channels are immutable and a circuit shares them, so each distinct channel is
+# built once, whatever the wires it acts on.
+_CHANNEL_CACHE: dict = {}
+_CHANNEL_CACHE_SIZE = 512
+
+
+def channel_to_maestro(op: Channel):
+    """The Maestro ``QuantumChannel`` of a PennyLane channel.
+
+    Maestro classifies Pauli channels and mixtures of unitaries from the Kraus
+    operators itself. Relaxation channels are given in Maestro's own form,
+    after checking that it is the map PennyLane's Kraus operators define, so
+    that a change of parameter convention cannot go unnoticed.
+    """
+    if not HAS_CHANNELS:
+        raise DeviceError(
+            f"{op.name} is a noise channel: the installed qoro-maestro has no "
+            "QuantumChannel. Upgrade qoro-maestro to run noisy circuits."
+        )
+    if len(op.wires) > 2:
+        raise DeviceError(
+            f"{op.name} acts on {len(op.wires)} wires: Maestro's noise channels act on one or two."
+        )
+    kraus = [np.asarray(qml.math.toarray(k), dtype=np.complex128) for k in op.kraus_matrices()]
+    key = (op.name, tuple(k.tobytes() for k in kraus))
+    channel = _CHANNEL_CACHE.get(key)
+    if channel is not None:
+        return channel
+
+    channel = maestro.QuantumChannel.from_kraus(kraus)
+    build = _STRUCTURED_CHANNELS.get(op.name)
+    if build is not None:
+        try:
+            structured = build(maestro.QuantumChannel, [_to_float(p) for p in op.data])
+            if np.allclose(structured.superoperator(), channel.superoperator(), atol=1e-12):
+                channel = structured
+        except (ValueError, RuntimeError):
+            pass  # outside the structured form's domain: the Kraus operators stand
+
+    if len(_CHANNEL_CACHE) >= _CHANNEL_CACHE_SIZE:
+        _CHANNEL_CACHE.clear()
+    _CHANNEL_CACHE[key] = channel
+    return channel
+
+
+def _apply_channel(qc: QuantumCircuit, op: Channel) -> None:
+    """Append a PennyLane channel to a Maestro circuit."""
+    # Converted first: a qoro-maestro without channels is reported as such.
+    channel = channel_to_maestro(op)
+    wires = [int(w) for w in op.wires]
+    # PennyLane's first wire is the most significant bit of the Kraus
+    # matrices; Maestro's first target is the least significant.
+    qc.channel(wires[::-1], channel)
+
+
+def has_channels(operations) -> bool:
+    """Whether any of the operations is a noise channel."""
+    return any(isinstance(op, Channel) for op in operations)
+
+
 def _apply_operation(
     qc: QuantumCircuit,
     op: qml.operation.Operator,
@@ -109,6 +191,11 @@ def _apply_operation(
             "Use mcm_method='one-shot' so that PennyLane's dynamic_one_shot "
             "transform resolves all Conditional ops into concrete gates."
         )
+
+    # ── Noise channel ─────────────────────────────────────
+    if isinstance(op, Channel):
+        _apply_channel(qc, op)
+        return
 
     # ── Delay operation ───────────────────────────────────
     if op.name == "Delay":

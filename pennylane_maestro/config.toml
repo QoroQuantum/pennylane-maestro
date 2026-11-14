@@ -36,6 +36,20 @@ Rot          = { properties = ["invertible", "differentiable"] }
 MidMeasureMP = { }
 Delay        = { }
 
+# Noise channels on one or two wires, with a qoro-maestro that has
+# QuantumChannel. The density matrix, the MPO and the Pauli propagator apply
+# them exactly; the statevector and the MPS sample them, one branch per shot.
+AmplitudeDamping            = { }
+GeneralizedAmplitudeDamping = { }
+PhaseDamping                = { }
+DepolarizingChannel         = { }
+BitFlip                     = { }
+PhaseFlip                   = { }
+PauliError                  = { }
+ResetError                  = { }
+ThermalRelaxationError      = { }
+QubitChannel                = { }
+
 # ──────────────────────────────────────────────────────────
 # Observables supported by the device for measurements.
 # ──────────────────────────────────────────────────────────

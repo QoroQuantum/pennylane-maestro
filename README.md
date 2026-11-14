@@ -14,6 +14,9 @@ quantum simulator, on your machine or in the Qoro cloud, by changing the device 
   measurements and broadcasting, with adjoint gradients by default.
 - **Beyond statevector**: matrix product state (MPS) for hundreds of qubits,
   with shot sampling, plus stabilizer, tensor network and Pauli propagation.
+- **Noise**: PennyLane's noise channels and `qp.add_noise` models, exact on
+  the density matrix and the MPO as on `default.mixed`, or sampled shot by shot
+  on the statevector and the MPS for circuits a density matrix cannot hold.
 - **Fast**: 5–6× faster than `lightning.qubit` on 20–26-qubit statevector
   circuits, and 10–18× faster than `default.tensor` on MPS circuits up to
   1,000 qubits ([benchmarks](https://qoroquantum.github.io/pennylane-maestro/guide/performance.html)).
