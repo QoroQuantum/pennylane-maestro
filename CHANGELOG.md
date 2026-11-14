@@ -39,6 +39,20 @@ releases may contain breaking changes).
   statevector to read them from. They are computed from Pauli expectation
   values there (`qp.probs` on up to 16 wires). `qp.state()` on those methods
   raises a `DeviceError` that says why.
+- With shots, a measurement of an observable that is not diagonal in the
+  computational basis was computed from computational-basis samples, without
+  rotating into the observable's basis first: on `|+>`, `qp.var(qp.X(0))`
+  returned 1 instead of 0, and `qp.expval(qp.X(0) + qp.Z(0))` returned about 0
+  instead of 1. It affected `qp.var`, `qp.sample` and `qp.counts` of an
+  observable, expectation values of sums (Hamiltonians) and of `qp.Hermitian`,
+  and, with native mid-circuit measurements, Pauli expectation values too.
+  Only a tape of nothing but Pauli-word expectation values was right, since it
+  takes Maestro's `estimate`. Now every measurement reads samples taken after
+  the gates that diagonalize its observable. Measurements that need different
+  bases on a wire are sampled in separate runs of `shots` shots each (one run
+  per basis, not per measurement), and a sum of Pauli words that do not
+  commute is measured word by word. A tape of expectation values of such sums
+  alone takes `estimate`, as a tape of Pauli words does.
 
 ## [0.7.1] - 2026-11-12
 

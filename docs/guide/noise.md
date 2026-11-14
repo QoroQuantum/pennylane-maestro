@@ -47,9 +47,11 @@ device says so instead of returning one branch as if it were the result:
 dev = qp.device("maestro.qubit", wires=20, shots=10_000, seed=7)   # statevector
 ```
 
-With shots there, expectation values of Pauli words are the average over one
-run per shot, each with its own branches. That average has no sampling error
-from the measurement itself, only from the noise.
+With shots there, expectation values of Pauli words, and of sums of them, are
+the average over one run per shot, each with its own branches. That average
+has no sampling error from the measurement itself, only from the noise. Other
+measurements (`qp.var`, samples, counts, `qp.Hermitian`) read the shots
+themselves, taken in the observable's basis.
 
 Sampling keeps the circuit on its own qubits, so it reaches sizes a density
 matrix cannot: a density matrix of n qubits costs as much as a statevector of
