@@ -26,8 +26,8 @@ model = qp.NoiseModel({
 noisy_circuit = qp.add_noise(circuit, model)
 ```
 
-Noise needs a qoro-maestro with `QuantumChannel`, which releases after 0.3.14
-have. An older one raises an error that says so.
+Noise needs a qoro-maestro release that has `QuantumChannel`: any release after
+0.3.14. An older release raises an error that says so.
 
 ## Exact or sampled
 
