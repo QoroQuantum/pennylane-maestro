@@ -11,6 +11,7 @@ All examples use `import pennylane as qp`.
 
 guide/options
 guide/gradients
+guide/noise
 guide/time_evolution
 guide/gpu_and_cloud
 guide/supported

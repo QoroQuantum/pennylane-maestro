@@ -8,6 +8,22 @@ releases may contain breaking changes).
 ## [Unreleased]
 
 ### Added
+- Noise channels. PennyLane's channel operations on one or two wires
+  (`AmplitudeDamping`, `GeneralizedAmplitudeDamping`, `PhaseDamping`,
+  `DepolarizingChannel`, `BitFlip`, `PhaseFlip`, `PauliError`, `ResetError`,
+  `ThermalRelaxationError`, `QubitChannel`) run on the local engine, and so do
+  `qp.add_noise` models, which insert them. They raised `DeviceError` before.
+  The density matrix, the MPO and the Pauli propagator apply a channel exactly:
+  analytic results agree with `default.mixed` to rounding. The statevector and
+  the MPS sample it, one Kraus branch each time the circuit runs, so a noisy
+  circuit needs shots there (the device says so) and each shot is its own run;
+  expectation values of Pauli words average one run per shot. Relaxation is
+  passed in Maestro's own form after checking it against PennyLane's Kraus
+  operators. Gradients of noisy circuits use parameter-shift. Needs a
+  qoro-maestro with `QuantumChannel` (releases after 0.3.14); an older one
+  raises an error that says so, and everything else works as before. See the
+  new [Noise](https://qoroquantum.github.io/pennylane-maestro/guide/noise.html)
+  page of the guide.
 - A documentation site, at
   [qoroquantum.github.io/pennylane-maestro](https://qoroquantum.github.io/pennylane-maestro/),
   built with Sphinx: the README's overview, the guide (one page per topic), the
@@ -15,6 +31,30 @@ releases may contain breaking changes).
   Docs workflow builds it on every pull request, failing on any Sphinx warning, and publishes
   it from `main`. `pip install -e ".[docs]"` installs what the build needs, and
   the README and the PyPI Documentation link point at the site.
+
+### Fixed
+- Analytic `qp.probs`, `qp.var` and expectation values of observables that
+  are not Pauli words (`qp.Hermitian`) failed on `simulation_type="DensityMatrix"`,
+  `"MatrixProductOperator"` and `"PauliPropagator"`, whose state has no
+  statevector to read them from. They are computed from Pauli expectation
+  values there (`qp.probs` on up to 16 wires, always a distribution: an entry
+  that rounding or a truncated state leaves below zero is set to zero and the
+  rest scaled to sum to one). `qp.state()` on those methods raises a
+  `DeviceError` that says why.
+- With shots, a measurement of an observable that is not diagonal in the
+  computational basis was computed from computational-basis samples, without
+  rotating into the observable's basis first: on `|+>`, `qp.var(qp.X(0))`
+  returned 1 instead of 0, and `qp.expval(qp.X(0) + qp.Z(0))` returned about 0
+  instead of 1. It affected `qp.var`, `qp.sample` and `qp.counts` of an
+  observable, expectation values of sums (Hamiltonians) and of `qp.Hermitian`,
+  and, with native mid-circuit measurements, Pauli expectation values too.
+  Only a tape of nothing but Pauli-word expectation values was right, since it
+  takes Maestro's `estimate`. Now every measurement reads samples taken after
+  the gates that diagonalize its observable. Measurements that need different
+  bases on a wire are sampled in separate runs of `shots` shots each (one run
+  per basis, not per measurement), and a sum of Pauli words that do not
+  commute is measured word by word. A tape of expectation values of such sums
+  alone takes `estimate`, as a tape of Pauli words does.
 
 ## [0.7.1] - 2026-11-12
 
