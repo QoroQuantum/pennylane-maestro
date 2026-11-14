@@ -168,7 +168,11 @@ def _probabilities_from_z(expectations) -> np.ndarray:
 
     Entry ``m`` of ``expectations`` is ``<Z_S>`` for the subset ``S`` whose
     wires are the set bits of ``m``, the first wire being the most significant
-    bit, as in the result."""
+    bit, as in the result.
+
+    The transform sums to one. Rounding, or a truncated state, can leave an
+    entry below zero: those are set to zero and the rest scaled to sum to one
+    again, so that the result is a probability distribution."""
     p = np.array(expectations, dtype=float)
     size, half = len(p), 1
     while half < size:
@@ -178,7 +182,14 @@ def _probabilities_from_z(expectations) -> np.ndarray:
             p[start:start + half] = low + high
             p[start + half:start + 2 * half] = low - high
         half *= 2
-    return np.maximum(p / size, 0.0)
+    p /= size
+    negative = p < 0.0
+    if negative.any():
+        p[negative] = 0.0
+        total = p.sum()
+        if total > 0.0:
+            p /= total
+    return p
 
 
 def _lsb_to_msb_statevector(state: np.ndarray, num_wires: int) -> np.ndarray:
@@ -1012,17 +1023,17 @@ class MaestroQubitDevice(Device):
         if mode is None:
             raise DeviceError(
                 f"{self.name} takes no noise channels with simulation_type="
-                f"'{self._method_name}'. Use 'DensityMatrix' or "
-                "'MatrixProductOperator' for exact noise, or 'Statevector' or "
-                "'MatrixProductState' with shots, which sample it."
+                f"'{self._method_name}'. Use 'DensityMatrix', "
+                "'MatrixProductOperator' or 'PauliPropagator' for exact noise, or "
+                "'Statevector' or 'MatrixProductState' with shots, which sample it."
             )
         if mode == "sampled" and not tape.shots:
             raise DeviceError(
                 f"simulation_type='{self._method_name}' samples noise channels from "
                 "its state, one branch each time the circuit runs, so a noisy "
                 "circuit has no analytic result there. Set shots, or use "
-                "simulation_type='DensityMatrix' (or 'MatrixProductOperator') for "
-                "exact values."
+                "simulation_type='DensityMatrix', 'MatrixProductOperator' or "
+                "'PauliPropagator' for exact values."
             )
 
     # ------------------------------------------------------------------

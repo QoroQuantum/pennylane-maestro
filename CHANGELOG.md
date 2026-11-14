@@ -37,8 +37,10 @@ releases may contain breaking changes).
   are not Pauli words (`qp.Hermitian`) failed on `simulation_type="DensityMatrix"`,
   `"MatrixProductOperator"` and `"PauliPropagator"`, whose state has no
   statevector to read them from. They are computed from Pauli expectation
-  values there (`qp.probs` on up to 16 wires). `qp.state()` on those methods
-  raises a `DeviceError` that says why.
+  values there (`qp.probs` on up to 16 wires, always a distribution: an entry
+  that rounding or a truncated state leaves below zero is set to zero and the
+  rest scaled to sum to one). `qp.state()` on those methods raises a
+  `DeviceError` that says why.
 - With shots, a measurement of an observable that is not diagonal in the
   computational basis was computed from computational-basis samples, without
   rotating into the observable's basis first: on `|+>`, `qp.var(qp.X(0))`

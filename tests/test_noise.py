@@ -150,8 +150,11 @@ def test_sampled_noise_has_no_analytic_result(method):
         noisy()
         return qml.expval(qml.Z(0))
 
-    with pytest.raises(DeviceError, match="Set shots"):
+    with pytest.raises(DeviceError, match="Set shots") as refused:
         qml.QNode(circuit, qml.device("maestro.qubit", wires=3, simulation_type=method))()
+    # The message names every method that gives exact values.
+    for exact in EXACT:
+        assert exact in str(refused.value)
 
 
 @pytest.mark.parametrize("method", ["Stabilizer", "TensorNetwork"])
@@ -163,8 +166,11 @@ def test_methods_that_hold_no_channels_refuse_them(method, shots):
         return qml.expval(qml.Z(0))
 
     device = qml.device("maestro.qubit", wires=1, simulation_type=method)
-    with pytest.raises(DeviceError, match="takes no noise channels"):
+    with pytest.raises(DeviceError, match="takes no noise channels") as refused:
         qml.set_shots(qml.QNode(circuit, device), shots)()
+    # The message names every method that takes them, exactly or sampled.
+    for supported in EXACT + SAMPLED:
+        assert supported in str(refused.value)
 
 
 def test_channels_on_more_than_two_wires_are_refused():
