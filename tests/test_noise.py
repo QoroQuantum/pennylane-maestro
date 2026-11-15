@@ -254,17 +254,17 @@ def test_a_noisy_circuit_does_not_take_the_adjoint_path():
     the adjoint method; with a channel and shots it must use parameter-shift."""
     device = qml.device("maestro.qubit", wires=1, seed=5)
 
-    @qml.set_shots(40000)
-    @qml.qnode(device)
     def circuit(x):
         qml.RX(x, wires=0)
         qml.BitFlip(0.1, wires=0)
         return qml.expval(qml.Z(0))
 
+    # The call form: older PennyLane releases do not take set_shots as a decorator.
+    node = qml.set_shots(qml.QNode(circuit, device), 40000)
     x = pnp.array(0.6, requires_grad=True)
     # <Z> = (1 - 2 * 0.1) cos(x)
-    assert abs(circuit(x) - 0.8 * np.cos(0.6)) < 0.03
-    assert abs(qml.grad(circuit)(x) + 0.8 * np.sin(0.6)) < 0.05
+    assert abs(node(x) - 0.8 * np.cos(0.6)) < 0.03
+    assert abs(qml.grad(node)(x) + 0.8 * np.sin(0.6)) < 0.05
 
 
 @pytest.mark.parametrize("method", SAMPLED + ["DensityMatrix"])

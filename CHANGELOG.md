@@ -19,7 +19,9 @@ releases may contain breaking changes).
   circuit needs shots there (the device says so) and each shot is its own run;
   expectation values of Pauli words average one run per shot. Relaxation is
   passed in Maestro's own form after checking it against PennyLane's Kraus
-  operators. Gradients of noisy circuits use parameter-shift. Needs a
+  operators; generalized amplitude damping is recognized under both meanings
+  PennyLane has given its second parameter (the excited population, or its
+  complement in 0.42). Gradients of noisy circuits use parameter-shift. Needs a
   qoro-maestro with `QuantumChannel` (0.3.15 or later); an older one
   raises an error that says so, and everything else works as before. See the
   new [Noise](https://qoroquantum.github.io/pennylane-maestro/guide/noise.html)

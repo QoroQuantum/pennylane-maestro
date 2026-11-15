@@ -73,14 +73,21 @@ def _to_float(p) -> float:
 
 # PennyLane channels Maestro has in a structured form. A sampling backend
 # draws a structured relaxation without reading its state where it can, which
-# a bare list of Kraus operators does not allow.
+# a bare list of Kraus operators does not allow. Each entry lists the forms to
+# try: the one that is the map of PennyLane's Kraus operators is used.
 _STRUCTURED_CHANNELS = {
-    "AmplitudeDamping": lambda q, p: q.amplitude_damping(p[0]),
-    "GeneralizedAmplitudeDamping": lambda q, p: q.generalized_amplitude_damping(p[0], p[1]),
-    "PhaseDamping": lambda q, p: q.phase_damping(p[0]),
-    "DepolarizingChannel": lambda q, p: q.depolarizing(p[0]),
+    "AmplitudeDamping": (lambda q, p: q.amplitude_damping(p[0]),),
+    # Maestro takes the excited population. PennyLane's second parameter is
+    # that population in recent releases and its complement in older ones
+    # (0.42 among them).
+    "GeneralizedAmplitudeDamping": (
+        lambda q, p: q.generalized_amplitude_damping(p[0], p[1]),
+        lambda q, p: q.generalized_amplitude_damping(p[0], 1.0 - p[1]),
+    ),
+    "PhaseDamping": (lambda q, p: q.phase_damping(p[0]),),
+    "DepolarizingChannel": (lambda q, p: q.depolarizing(p[0]),),
     # ThermalRelaxationError(pe, t1, t2, tq)
-    "ThermalRelaxationError": lambda q, p: q.thermal_relaxation(p[3], p[1], p[2], p[0]),
+    "ThermalRelaxationError": (lambda q, p: q.thermal_relaxation(p[3], p[1], p[2], p[0]),),
 }
 
 # Channels are immutable and a circuit shares them, so each distinct channel is
@@ -113,14 +120,15 @@ def channel_to_maestro(op: Channel):
         return channel
 
     channel = maestro.QuantumChannel.from_kraus(kraus)
-    build = _STRUCTURED_CHANNELS.get(op.name)
-    if build is not None:
+    for build in _STRUCTURED_CHANNELS.get(op.name, ()):
         try:
             structured = build(maestro.QuantumChannel, [_to_float(p) for p in op.data])
-            if np.allclose(structured.superoperator(), channel.superoperator(), atol=1e-12):
-                channel = structured
         except (ValueError, RuntimeError):
-            pass  # outside the structured form's domain: the Kraus operators stand
+            continue  # outside this form's domain
+        if np.allclose(structured.superoperator(), channel.superoperator(), atol=1e-12):
+            channel = structured
+            break
+    # With no matching form the Kraus operators stand.
 
     if len(_CHANNEL_CACHE) >= _CHANNEL_CACHE_SIZE:
         _CHANNEL_CACHE.clear()
