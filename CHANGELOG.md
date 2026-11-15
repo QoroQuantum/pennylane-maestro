@@ -20,7 +20,7 @@ releases may contain breaking changes).
   expectation values of Pauli words average one run per shot. Relaxation is
   passed in Maestro's own form after checking it against PennyLane's Kraus
   operators. Gradients of noisy circuits use parameter-shift. Needs a
-  qoro-maestro with `QuantumChannel` (releases after 0.3.14); an older one
+  qoro-maestro with `QuantumChannel` (0.3.15 or later); an older one
   raises an error that says so, and everything else works as before. See the
   new [Noise](https://qoroquantum.github.io/pennylane-maestro/guide/noise.html)
   page of the guide.

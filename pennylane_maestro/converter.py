@@ -11,7 +11,7 @@ from pennylane.operation import Channel
 from pennylane.ops.op_math import Conditional
 from maestro.circuits import QuantumCircuit
 
-# Noise channels need a qoro-maestro with QuantumChannel (after 0.3.14).
+# Noise channels need a qoro-maestro with QuantumChannel (0.3.15 or later).
 HAS_CHANNELS = hasattr(maestro, "QuantumChannel")
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def channel_to_maestro(op: Channel):
     if not HAS_CHANNELS:
         raise DeviceError(
             f"{op.name} is a noise channel: the installed qoro-maestro has no "
-            "QuantumChannel. Upgrade qoro-maestro to run noisy circuits."
+            "QuantumChannel. Upgrade qoro-maestro to 0.3.15 or later to run noisy circuits."
         )
     if len(op.wires) > 2:
         raise DeviceError(
