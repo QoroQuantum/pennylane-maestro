@@ -1,5 +1,6 @@
 import numpy as np
 import pennylane as qml
+import pytest
 
 def test_expval(tol, shots):
     """Test expectation value of PauliZ."""
@@ -131,3 +132,22 @@ def test_multiple_measurements(tol, shots):
     else:
         assert np.isclose(res_maestro[0], res_default[0], atol=0.05)
         assert np.isclose(res_maestro[1], res_default[1], atol=0.05)
+
+
+def test_probabilities_from_z_are_a_distribution():
+    """The transform of the Z expectation values sums to one. Where rounding or a
+    truncated state leaves an entry below zero, the result is still a distribution:
+    nothing negative, summing to one. This needs no noise and no simulation."""
+    from pennylane_maestro.maestro_device import _probabilities_from_z
+
+    # One wire, <Z> = 0.2: exact, and left as it is.
+    assert _probabilities_from_z([1.0, 0.2]) == pytest.approx([0.6, 0.4], abs=1e-15)
+    # Two wires in |01>: <ZI> = 1, <IZ> = -1, <ZZ> = -1 (the first wire is the high bit).
+    assert _probabilities_from_z([1.0, -1.0, 1.0, -1.0]) == pytest.approx([0, 1, 0, 0], abs=1e-15)
+    # <Z> just above one, as a truncation can leave it: -0.00005 before it is set to zero.
+    clipped = _probabilities_from_z([1.0, 1.0001])
+    assert np.all(clipped >= 0) and clipped.sum() == pytest.approx(1.0, abs=1e-15)
+    assert clipped == pytest.approx([1.0, 0.0], abs=1e-15)
+    # Several entries below zero among four.
+    clipped = _probabilities_from_z([1.0, 0.9, 0.9, 1.02])
+    assert np.all(clipped >= 0) and clipped.sum() == pytest.approx(1.0, abs=1e-15)
